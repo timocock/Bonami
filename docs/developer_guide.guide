@@ -1,0 +1,340 @@
+@DATABASE BonAmi Developer Guide
+@AUTHOR AmigaZen
+@WORDWRAP
+@TITLE "BonAmi Developer Guide"
+@NODE "main" "Introduction"
+@NEXT "main" "architecture"
+@HEADING "BonAmi Developer Guide"
+@BODY
+BonAmi is an mDNS (multicast DNS) and DNS-SD (DNS Service Discovery) implementation for AmigaOS 3.x and 4.x, designed to provide service discovery capabilities similar to Apple's Bonjour. This guide will help you understand how to use the BonAmi library in your applications.
+
+@LINK "architecture" "Architecture"
+@LINK "features" "Features"
+@LINK "getting_started" "Getting Started"
+@LINK "service_registration" "Service Registration"
+@LINK "service_discovery" "Service Discovery"
+@LINK "txt_records" "TXT Records"
+@LINK "error_handling" "Error Handling"
+@LINK "best_practices" "Best Practices"
+@LINK "examples" "Examples"
+@LINK "troubleshooting" "Troubleshooting"
+@LINK "contributing" "Contributing"
+@LINK "license" "License"
+
+@NODE "architecture" "Architecture"
+@PREV "architecture" "main"
+@NEXT "architecture" "features"
+@HEADING "Architecture"
+@BODY
+BonAmi follows a client-server architecture:
+
+@BOLD "Library (bonami.library)"
+A thin client library that provides a simple API for applications to interact with the mDNS daemon. The library is stateless and handles message passing to the daemon.
+
+@BOLD "Daemon (Bonami)"
+A background process that manages all mDNS operations, including:
+- Service registration and discovery
+- Network interface management
+- State management
+- Resource management
+- Memory pools for long-lived objects
+
+@NODE "features" "Features"
+@PREV "features" "architecture"
+@NEXT "features" "getting_started"
+@HEADING "Features"
+@BODY
+- Service registration and discovery
+- Support for TXT records
+- Automatic service conflict resolution
+- Service monitoring and updates
+- Thread-safe operations
+- Memory pool management
+- AmigaOS 3.x and 4.x support
+
+@NODE "getting_started" "Getting Started"
+@PREV "getting_started" "features"
+@NEXT "getting_started" "service_registration"
+@HEADING "Getting Started"
+@BODY
+@BOLD "Including the Library"
+@CODE
+#include <proto/bonami.h>
+@ENDCODE
+
+@BOLD "Initializing the Library"
+@CODE
+struct Library *BonamiBase = OpenLibrary("bonami.library", 40);  /* Version 40 for AmigaOS 3.1 */
+if (!BonamiBase) {
+    /* Handle error */
+}
+
+#ifdef __amigaos4__
+struct BonAmiIFace *IBonAmi = (struct BonAmiIFace *)GetInterface(BonamiBase, "main", 1, NULL);
+if (!IBonAmi) {
+    /* Handle error */
+}
+#endif
+@ENDCODE
+
+@NODE "service_registration" "Service Registration"
+@PREV "service_registration" "getting_started"
+@NEXT "service_registration" "service_discovery"
+@HEADING "Service Registration"
+@BODY
+@BOLD "Registering a Service"
+@CODE
+struct BAService service = {
+    .name = "My Service",
+    .type = "_http._tcp",
+    .port = 80,
+    .txt = "path=/"
+};
+
+LONG result = BARegisterService(&service);
+if (result != BA_OK) {
+    /* Handle error */
+}
+@ENDCODE
+
+@BOLD "Unregistering a Service"
+@CODE
+LONG result = BAUnregisterService("My Service", "_http._tcp");
+if (result != BA_OK) {
+    /* Handle error */
+}
+@ENDCODE
+
+@NODE "service_discovery" "Service Discovery"
+@PREV "service_discovery" "service_registration"
+@NEXT "service_discovery" "txt_records"
+@HEADING "Service Discovery"
+@BODY
+@BOLD "Starting Discovery"
+@CODE
+struct BADiscovery discovery = {
+    .type = "_http._tcp",
+    .callback = myCallback,
+    .userData = NULL
+};
+
+LONG result = BAStartDiscovery(&discovery);
+if (result != BA_OK) {
+    /* Handle error */
+}
+@ENDCODE
+
+@BOLD "Discovery Callback"
+@CODE
+void myCallback(struct BAService *service, APTR userData)
+{
+    /* Handle discovered service */
+    printf("Found service: %s\n", service->name);
+    printf("Type: %s\n", service->type);
+    printf("Port: %d\n", service->port);
+    printf("TXT: %s\n", service->txt);
+}
+@ENDCODE
+
+@BOLD "Stopping Discovery"
+@CODE
+LONG result = BAStopDiscovery(&discovery);
+if (result != BA_OK) {
+    /* Handle error */
+}
+@ENDCODE
+
+@NODE "txt_records" "TXT Records"
+@PREV "txt_records" "service_discovery"
+@NEXT "txt_records" "error_handling"
+@HEADING "TXT Records"
+@BODY
+@BOLD "Creating TXT Records"
+@CODE
+STRPTR txt = BACreateTXTRecord("path", "/");
+if (!txt) {
+    /* Handle error */
+}
+
+/* Use TXT record */
+struct BAService service = {
+    .name = "My Service",
+    .type = "_http._tcp",
+    .port = 80,
+    .txt = txt
+};
+
+/* Free TXT record when done */
+BAFreeTXTRecord(txt);
+@ENDCODE
+
+@NODE "error_handling" "Error Handling"
+@PREV "error_handling" "txt_records"
+@NEXT "error_handling" "best_practices"
+@HEADING "Error Handling"
+@BODY
+BonAmi uses the following error codes:
+
+- @BOLD "BA_OK": Operation successful
+- @BOLD "BA_NOMEM": Out of memory
+- @BOLD "BA_INVALID": Invalid parameter
+- @BOLD "BA_DUPLICATE": Service already registered
+- @BOLD "BA_NOTFOUND": Service not found
+- @BOLD "BA_TIMEOUT": Operation timed out
+- @BOLD "BA_NETWORK": Network error
+- @BOLD "BA_VERSION": Version mismatch
+
+@NODE "best_practices" "Best Practices"
+@PREV "best_practices" "error_handling"
+@NEXT "best_practices" "examples"
+@HEADING "Best Practices"
+@BODY
+1. @BOLD "Service Names"
+   - Use unique, descriptive names
+   - Follow DNS naming conventions
+   - Avoid special characters
+
+2. @BOLD "Service Types"
+   - Use standard service types when available
+   - Follow the `_service._tcp` format
+   - Register new types with IANA
+
+3. @BOLD "Error Handling"
+   - Always check return values
+   - Handle all possible error conditions
+   - Clean up resources on error
+
+4. @BOLD "Resource Management"
+   - Unregister services when done
+   - Stop discovery when no longer needed
+   - Free allocated memory
+   - Close library properly
+
+5. @BOLD "AmigaOS 4.x Support"
+   - Use interface-based calls
+   - Handle interface versioning
+   - Clean up interfaces properly
+
+@NODE "examples" "Examples"
+@PREV "examples" "best_practices"
+@NEXT "examples" "troubleshooting"
+@HEADING "Examples"
+@BODY
+@BOLD "Complete Example"
+@CODE
+#include <proto/bonami.h>
+#include <stdio.h>
+
+void serviceCallback(struct BAService *service, APTR userData)
+{
+    printf("Found service: %s\n", service->name);
+    printf("Type: %s\n", service->type);
+    printf("Port: %d\n", service->port);
+    printf("TXT: %s\n", service->txt);
+}
+
+int main(void)
+{
+    struct Library *BonamiBase = OpenLibrary("bonami.library", 40);
+    if (!BonamiBase) {
+        printf("Failed to open bonami.library\n");
+        return 1;
+    }
+    
+#ifdef __amigaos4__
+    struct BonAmiIFace *IBonAmi = (struct BonAmiIFace *)GetInterface(BonamiBase, "main", 1, NULL);
+    if (!IBonAmi) {
+        printf("Failed to get interface\n");
+        CloseLibrary(BonamiBase);
+        return 1;
+    }
+#endif
+    
+    /* Register a service */
+    struct BAService service = {
+        .name = "My Web Server",
+        .type = "_http._tcp",
+        .port = 80,
+        .txt = "path=/"
+    };
+    
+    LONG result = BARegisterService(&service);
+    if (result != BA_OK) {
+        printf("Failed to register service: %ld\n", result);
+        goto cleanup;
+    }
+    
+    /* Start discovery */
+    struct BADiscovery discovery = {
+        .type = "_http._tcp",
+        .callback = serviceCallback,
+        .userData = NULL
+    };
+    
+    result = BAStartDiscovery(&discovery);
+    if (result != BA_OK) {
+        printf("Failed to start discovery: %ld\n", result);
+        BAUnregisterService(service.name, service.type);
+        goto cleanup;
+    }
+    
+    /* Wait for discoveries */
+    printf("Waiting for services...\n");
+    Delay(5000);  /* Wait 5 seconds */
+    
+    /* Cleanup */
+    BAStopDiscovery(&discovery);
+    BAUnregisterService(service.name, service.type);
+    
+cleanup:
+#ifdef __amigaos4__
+    DropInterface((struct Interface *)IBonAmi);
+#endif
+    CloseLibrary(BonamiBase);
+    
+    return 0;
+}
+@ENDCODE
+
+@NODE "troubleshooting" "Troubleshooting"
+@PREV "troubleshooting" "examples"
+@NEXT "troubleshooting" "contributing"
+@HEADING "Troubleshooting"
+@BODY
+@BOLD "Common Issues"
+
+1. @BOLD "Service Registration Fails"
+   - Check for name conflicts
+   - Verify network connectivity
+   - Check interface status
+   - Verify service type format
+
+2. @BOLD "Discovery Not Working"
+   - Verify network connectivity
+   - Check interface status
+   - Verify service type
+   - Check callback function
+
+3. @BOLD "Network Issues"
+   - Check interface status
+   - Verify multicast support
+   - Check firewall settings
+   - Verify network configuration
+
+@NODE "contributing" "Contributing"
+@PREV "contributing" "troubleshooting"
+@NEXT "contributing" "license"
+@HEADING "Contributing"
+@BODY
+We welcome contributions to BonAmi. Please follow these guidelines:
+1. Follow the existing code style
+2. Add proper error handling
+3. Update documentation
+4. Add tests when possible
+
+@NODE "license" "License"
+@PREV "license" "contributing"
+@NEXT "license" "main"
+@HEADING "License"
+@BODY
+BonAmi is released under the MIT License. See the LICENSE file for details. 
