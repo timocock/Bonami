@@ -24,6 +24,10 @@
 #define BONAMI_MSG_RESOLVE     4
 #define BONAMI_MSG_QUERY       5
 #define BONAMI_MSG_UPDATE      6
+#define BONAMI_MSG_FILTER      7
+#define BONAMI_MSG_MONITOR     8
+#define BONAMI_MSG_BATCH       9
+#define BONAMI_MSG_CONFIG      10
 
 /* Message structure for daemon communication */
 struct BonamiMessage {
@@ -56,19 +60,35 @@ struct BonamiMessage {
             char type[256];
             struct BonamiTXTRecord txt;
         } update_msg;
+        struct {
+            struct BonamiFilter filter;
+        } filter_msg;
+        struct {
+            struct BonamiMonitor monitor;
+        } monitor_msg;
+        struct {
+            struct BonamiBatch batch;
+        } batch_msg;
+        struct {
+            struct BonamiConfig config;
+        } config_msg;
     } data;
 };
 
-/* Library base structure - minimal, no state */
+/* Library base structure */
 struct BonamiBase {
     struct Library lib;
     struct MsgPort *replyPort;
     struct MsgPort *daemonPort;
+    struct List *monitors;      // List of monitored services
+    struct BonamiConfig config; // Current configuration
 };
 
 /* Function prototypes */
 static LONG sendMessage(struct BonamiBase *base, struct BonamiMessage *msg);
 static LONG waitReply(struct BonamiBase *base, struct BonamiMessage *msg);
+static void monitorTask(void *arg);
+static BOOL matchFilter(struct BonamiService *service, struct BonamiFilter *filter);
 
 /* Service registration */
 LONG BonamiRegisterService(struct BonamiService *service)
@@ -159,6 +179,176 @@ LONG BonamiStopDiscovery(struct BonamiDiscovery *discovery)
     return BONAMI_OK;
 }
 
+/* Start service discovery with filter */
+LONG BonamiStartFilteredDiscovery(const char *type,
+                                struct BonamiFilter *filter,
+                                BonamiServiceCallback cb,
+                                APTR userData)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMessage *msg;
+    struct BonamiDiscovery discovery;
+    
+    if (!type || !filter || !cb) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Set up discovery */
+    strncpy(discovery.type, type, sizeof(discovery.type) - 1);
+    discovery.callback = cb;
+    discovery.userData = userData;
+    
+    /* Allocate message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->type = BONAMI_MSG_FILTER;
+    memcpy(&msg->data.filter_msg.filter, filter, sizeof(struct BonamiFilter));
+    memcpy(&msg->data.discover_msg.discovery, &discovery, sizeof(struct BonamiDiscovery));
+    
+    /* Send to daemon */
+    LONG result = sendMessage(base, msg);
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    
+    return result;
+}
+
+/* Monitor service availability */
+LONG BonamiMonitorService(const char *name,
+                         const char *type,
+                         LONG checkInterval,
+                         BOOL notifyOffline)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMessage *msg;
+    struct BonamiMonitor *monitor;
+    
+    if (!name || !type) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Create monitor structure */
+    monitor = AllocMem(sizeof(struct BonamiMonitor), MEMF_CLEAR);
+    if (!monitor) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Initialize monitor */
+    strncpy(monitor->name, name, sizeof(monitor->name) - 1);
+    strncpy(monitor->type, type, sizeof(monitor->type) - 1);
+    monitor->checkInterval = checkInterval;
+    monitor->notifyOffline = notifyOffline;
+    
+    /* Allocate message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        FreeMem(monitor, sizeof(struct BonamiMonitor));
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->type = BONAMI_MSG_MONITOR;
+    memcpy(&msg->data.monitor_msg.monitor, monitor, sizeof(struct BonamiMonitor));
+    
+    /* Send to daemon */
+    LONG result = sendMessage(base, msg);
+    if (result == BONAMI_OK) {
+        /* Add to monitor list */
+        AddTail(base->monitors, (struct Node *)monitor);
+    } else {
+        FreeMem(monitor, sizeof(struct BonamiMonitor));
+    }
+    
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    return result;
+}
+
+/* Get multiple services */
+LONG BonamiGetServices(const char *type,
+                      struct BonamiService *services,
+                      ULONG *numServices)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMessage *msg;
+    struct BonamiBatch batch;
+    
+    if (!type || !services || !numServices) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Set up batch */
+    batch.services = services;
+    batch.numServices = 0;
+    batch.maxServices = *numServices;
+    
+    /* Allocate message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->type = BONAMI_MSG_BATCH;
+    memcpy(&msg->data.batch_msg.batch, &batch, sizeof(struct BonamiBatch));
+    
+    /* Send to daemon */
+    LONG result = sendMessage(base, msg);
+    if (result == BONAMI_OK) {
+        *numServices = batch.numServices;
+    }
+    
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    return result;
+}
+
+/* Set configuration */
+LONG BonamiSetConfig(struct BonamiConfig *config)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMessage *msg;
+    
+    if (!config) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Allocate message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->type = BONAMI_MSG_CONFIG;
+    memcpy(&msg->data.config_msg.config, config, sizeof(struct BonamiConfig));
+    
+    /* Send to daemon */
+    LONG result = sendMessage(base, msg);
+    if (result == BONAMI_OK) {
+        /* Update local config */
+        memcpy(&base->config, config, sizeof(struct BonamiConfig));
+    }
+    
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    return result;
+}
+
+/* Get configuration */
+LONG BonamiGetConfig(struct BonamiConfig *config)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    
+    if (!config) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Copy current config */
+    memcpy(config, &base->config, sizeof(struct BonamiConfig));
+    return BONAMI_OK;
+}
+
 /* Send message to daemon */
 static LONG sendMessage(struct BonamiBase *base, struct BonamiMessage *msg)
 {
@@ -198,6 +388,53 @@ static LONG waitReply(struct BonamiBase *base, struct BonamiMessage *msg)
     return result;
 }
 
+/* Match service against filter */
+static BOOL matchFilter(struct BonamiService *service, struct BonamiFilter *filter)
+{
+    if (!filter->txtKey) {
+        return TRUE;  // No filter
+    }
+    
+    /* Check TXT records */
+    struct BonamiTXTRecord *txt = service->txt;
+    while (txt) {
+        if (strcmp(txt->key, filter->txtKey) == 0) {
+            if (filter->wildcard) {
+                return strstr(txt->value, filter->txtValue) != NULL;
+            } else {
+                return strcmp(txt->value, filter->txtValue) == 0;
+            }
+        }
+        txt = txt->next;
+    }
+    
+    return FALSE;
+}
+
+/* Monitor task */
+static void monitorTask(void *arg)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMonitor *monitor = (struct BonamiMonitor *)arg;
+    struct BonamiService service;
+    LONG result;
+    
+    while (monitor->running) {
+        /* Check service */
+        result = BonamiResolveService(monitor->name, monitor->type, &service);
+        
+        if (result != BONAMI_OK && monitor->notifyOffline) {
+            /* Service is offline, notify */
+            if (monitor->callback) {
+                monitor->callback(NULL, monitor->userData);
+            }
+        }
+        
+        /* Wait for next check */
+        Delay(monitor->checkInterval * 50);  // Convert to ticks
+    }
+}
+
 /* Library open */
 struct Library *OpenLibrary(void)
 {
@@ -229,6 +466,21 @@ struct Library *OpenLibrary(void)
         return NULL;
     }
     
+    /* Initialize monitor list */
+    base->monitors = AllocMem(sizeof(struct List), MEMF_CLEAR);
+    if (!base->monitors) {
+        DeleteMsgPort(base->replyPort);
+        FreeMem(base, sizeof(struct BonamiBase));
+        return NULL;
+    }
+    NewList(base->monitors);
+    
+    /* Initialize default configuration */
+    base->config.discoveryTimeout = 5;    // 5 seconds
+    base->config.resolveTimeout = 2;      // 2 seconds
+    base->config.ttl = 120;               // 2 minutes
+    base->config.autoReconnect = TRUE;
+    
     return (struct Library *)base;
 }
 
@@ -236,6 +488,17 @@ struct Library *OpenLibrary(void)
 void CloseLibrary(void)
 {
     struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMonitor *monitor;
+    
+    /* Stop all monitors */
+    while ((monitor = (struct BonamiMonitor *)RemHead(base->monitors))) {
+        monitor->running = FALSE;
+        FreeMem(monitor, sizeof(struct BonamiMonitor));
+    }
+    
+    if (base->monitors) {
+        FreeMem(base->monitors, sizeof(struct List));
+    }
     
     if (base->replyPort) {
         DeleteMsgPort(base->replyPort);
