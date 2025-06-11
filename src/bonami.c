@@ -7,17 +7,33 @@
 #include <proto/dos.h>
 #include <proto/bsdsocket.h>
 #include <proto/roadshow.h>
+#include <proto/utility.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include "../include/bonami.h"
 #include "../include/dns.h"
 
 /* Constants */
 #define MDNS_PORT 5353
-#define MDNS_MULTICAST_ADDR 0xE00000FB  /* 224.0.0.251 in network byte order */
-#define MDNS_TTL 255
-#define BONAMI_SIGNAL SIGBREAKF_CTRL_C
+#define MDNS_MULTICAST_ADDR "224.0.0.251"
+#define MDNS_TTL 120
+#define CONFIG_FILE "ENV:Bonami/config"
+#define PID_FILE "ENV:Bonami/pid"
+#define LOG_FILE "ENV:Bonami/log"
+
+/* Log levels */
+#define LOG_ERROR 0
+#define LOG_WARN  1
+#define LOG_INFO  2
+#define LOG_DEBUG 3
 
 /* Message types */
 #define BONAMI_MSG_REGISTER    1
@@ -89,15 +105,20 @@ struct SRVRecord {
 };
 
 /* Global state */
-struct {
-    struct SignalSemaphore lock;
-    struct MsgPort *port;
+static struct {
+    struct Library *bsdsocket;
+    struct Library *roadshow;
+    struct Library *utility;
+    struct Library *dos;
+    struct Library *exec;
     struct List *services;
     struct List *discoveries;
-    struct Task *mainTask;
-    struct Task *networkTask;
+    struct SignalSemaphore lock;
+    struct MsgPort *port;
     BOOL running;
     BOOL networkReady;
+    LONG logLevel;
+    LONG logFile;
 } bonami;
 
 /* DNS query structure */
@@ -111,81 +132,289 @@ struct DNSQuery {
 };
 
 /* Function prototypes */
-static void initDaemon(void);
+static LONG initDaemon(void);
 static void cleanupDaemon(void);
-static void processMessage(struct BonamiMessage *msg);
 static void networkMonitorTask(void);
+static void discoveryTask(void);
+static void processMessage(struct BonamiMessage *msg);
+static LONG createMulticastSocket(void);
+static LONG checkNetworkStatus(void);
 static struct BonamiServiceNode *findService(const char *name, const char *type);
 static struct BonamiDiscoveryNode *findDiscovery(const char *type);
-static void discoveryTask(void *arg);
-static LONG checkNetworkStatus(void);
-static LONG createMulticastSocket(void);
-static void processQuery(const UBYTE *data, LONG len, struct sockaddr_in *from);
-static void processResponse(const UBYTE *data, LONG len, struct sockaddr_in *from);
-static void sendMulticast(LONG sock, const UBYTE *data, LONG len);
 static void updateServiceRecords(struct BonamiServiceNode *service);
 static void removeServiceRecords(struct BonamiServiceNode *service);
 static LONG processDNSQuery(struct DNSQuery *query);
 static LONG validateServiceName(const char *name);
 static LONG validateServiceType(const char *type);
+static void logMessage(LONG level, const char *format, ...);
+static LONG loadConfig(void);
+static void signalHandler(LONG sig);
+static LONG writePIDFile(void);
+static void removePIDFile(void);
 
 /* Initialize daemon */
-static void initDaemon(void)
+static LONG initDaemon(void)
 {
-    /* Initialize semaphore */
-    InitSemaphore(&bonami.lock);
+    LONG result;
+    
+    /* Open required libraries */
+    bonami.exec = OpenLibrary("exec.library", 0);
+    if (!bonami.exec) {
+        return BONAMI_ERROR;
+    }
+    
+    bonami.dos = OpenLibrary("dos.library", 0);
+    if (!bonami.dos) {
+        cleanupDaemon();
+        return BONAMI_ERROR;
+    }
+    
+    bonami.utility = OpenLibrary("utility.library", 0);
+    if (!bonami.utility) {
+        cleanupDaemon();
+        return BONAMI_ERROR;
+    }
+    
+    bonami.bsdsocket = OpenLibrary("bsdsocket.library", 0);
+    if (!bonami.bsdsocket) {
+        cleanupDaemon();
+        return BONAMI_ERROR;
+    }
+    
+    bonami.roadshow = OpenLibrary("roadshow.library", 0);
+    if (!bonami.roadshow) {
+        cleanupDaemon();
+        return BONAMI_ERROR;
+    }
+    
+    /* Initialize socket library */
+    if (SocketBaseTags(SBTM_SETVAL(SBTC_ERRNOPTR(sizeof(errno))), (ULONG)&errno,
+                       SBTM_SETVAL(SBTC_LOGTAGPTR), (ULONG)"Bonami",
+                       TAG_DONE)) {
+        cleanupDaemon();
+        return BONAMI_ERROR;
+    }
     
     /* Create message port */
     bonami.port = CreateMsgPort();
     if (!bonami.port) {
-        return;
+        cleanupDaemon();
+        return BONAMI_ERROR;
     }
     
     /* Initialize lists */
     bonami.services = AllocMem(sizeof(struct List), MEMF_CLEAR);
     bonami.discoveries = AllocMem(sizeof(struct List), MEMF_CLEAR);
+    if (!bonami.services || !bonami.discoveries) {
+        cleanupDaemon();
+        return BONAMI_NOMEM;
+    }
+    NewList(bonami.services);
+    NewList(bonami.discoveries);
     
-    if (bonami.services && bonami.discoveries) {
-        NewList(bonami.services);
-        NewList(bonami.discoveries);
+    /* Initialize semaphore */
+    InitSemaphore(&bonami.lock);
+    
+    /* Load configuration */
+    result = loadConfig();
+    if (result != BONAMI_OK) {
+        cleanupDaemon();
+        return result;
     }
     
-    /* Set main task */
-    bonami.mainTask = FindTask(NULL);
+    /* Set up signal handling */
+    signal(SIGTERM, signalHandler);
+    signal(SIGINT, signalHandler);
+    signal(SIGHUP, signalHandler);
+    
+    /* Write PID file */
+    result = writePIDFile();
+    if (result != BONAMI_OK) {
+        cleanupDaemon();
+        return result;
+    }
+    
+    /* Create log file */
+    bonami.logFile = Open(CONFIG_FILE, MODE_NEWFILE);
+    if (bonami.logFile < 0) {
+        cleanupDaemon();
+        return BONAMI_ERROR;
+    }
+    
     bonami.running = TRUE;
     bonami.networkReady = FALSE;
     
-    /* Start network monitor task */
-    bonami.networkTask = CreateTask("BonAmi Network", 0, networkMonitorTask, NULL, 4096);
+    logMessage(LOG_INFO, "Bonami daemon initialized");
+    return BONAMI_OK;
+}
+
+/* Load configuration */
+static LONG loadConfig(void)
+{
+    BPTR file;
+    char buffer[256];
+    LONG result = BONAMI_OK;
+    
+    /* Create config directory if it doesn't exist */
+    CreateDir("ENV:Bonami");
+    
+    /* Open config file */
+    file = Open(CONFIG_FILE, MODE_OLDFILE);
+    if (file) {
+        /* Read log level */
+        if (FGets(file, buffer, sizeof(buffer))) {
+            bonami.logLevel = atoi(buffer);
+        } else {
+            bonami.logLevel = LOG_INFO;  /* Default level */
+        }
+        Close(file);
+    } else {
+        /* Create default config */
+        file = Open(CONFIG_FILE, MODE_NEWFILE);
+        if (file) {
+            FPrintf(file, "%ld\n", LOG_INFO);
+            Close(file);
+            bonami.logLevel = LOG_INFO;
+        } else {
+            result = BONAMI_ERROR;
+        }
+    }
+    
+    return result;
+}
+
+/* Write PID file */
+static LONG writePIDFile(void)
+{
+    BPTR file;
+    LONG pid;
+    
+    /* Get process ID */
+    pid = GetPID();
+    
+    /* Write PID file */
+    file = Open(PID_FILE, MODE_NEWFILE);
+    if (file) {
+        FPrintf(file, "%ld\n", pid);
+        Close(file);
+        return BONAMI_OK;
+    }
+    
+    return BONAMI_ERROR;
+}
+
+/* Remove PID file */
+static void removePIDFile(void)
+{
+    DeleteFile(PID_FILE);
+}
+
+/* Signal handler */
+static void signalHandler(LONG sig)
+{
+    switch (sig) {
+        case SIGTERM:
+        case SIGINT:
+            logMessage(LOG_INFO, "Received termination signal");
+            bonami.running = FALSE;
+            break;
+            
+        case SIGHUP:
+            logMessage(LOG_INFO, "Received reload signal");
+            loadConfig();
+            break;
+    }
+}
+
+/* Log message */
+static void logMessage(LONG level, const char *format, ...)
+{
+    char buffer[512];
+    va_list args;
+    struct DateStamp ds;
+    char date[32];
+    char time[32];
+    
+    /* Check log level */
+    if (level > bonami.logLevel) {
+        return;
+    }
+    
+    /* Get current date and time */
+    DateStamp(&ds);
+    Amiga2Date(&ds, date);
+    sprintf(time, "%02ld:%02ld:%02ld", date->hour, date->min, date->sec);
+    
+    /* Format message */
+    va_start(args, format);
+    vsprintf(buffer, format, args);
+    va_end(args);
+    
+    /* Write to log file */
+    if (bonami.logFile >= 0) {
+        FPrintf(bonami.logFile, "[%s] %s\n", time, buffer);
+        Flush(bonami.logFile);
+    }
 }
 
 /* Cleanup daemon */
 static void cleanupDaemon(void)
 {
+    struct BonamiServiceNode *service;
+    struct BonamiDiscoveryNode *discovery;
+    
+    /* Stop daemon */
+    bonami.running = FALSE;
+    
+    /* Close log file */
+    if (bonami.logFile >= 0) {
+        Close(bonami.logFile);
+        bonami.logFile = -1;
+    }
+    
+    /* Remove PID file */
+    removePIDFile();
+    
+    /* Free services */
     if (bonami.services) {
-        /* Free all service nodes */
-        struct Node *node, *next;
-        for (node = bonami.services->lh_Head; (next = node->ln_Succ); node = next) {
-            Remove(node);
-            FreeMem(node, sizeof(struct BonamiServiceNode));
+        while ((service = (struct BonamiServiceNode *)RemHead(bonami.services))) {
+            removeServiceRecords(service);
+            FreeMem(service, sizeof(struct BonamiServiceNode));
         }
         FreeMem(bonami.services, sizeof(struct List));
     }
     
+    /* Free discoveries */
     if (bonami.discoveries) {
-        /* Stop all discoveries */
-        struct Node *node, *next;
-        for (node = bonami.discoveries->lh_Head; (next = node->ln_Succ); node = next) {
-            struct BonamiDiscoveryNode *discovery = (struct BonamiDiscoveryNode *)node;
-            discovery->running = FALSE;
-            Signal(discovery->task, SIGBREAKF_CTRL_C);
+        while ((discovery = (struct BonamiDiscoveryNode *)RemHead(bonami.discoveries))) {
+            FreeMem(discovery, sizeof(struct BonamiDiscoveryNode));
         }
         FreeMem(bonami.discoveries, sizeof(struct List));
     }
     
+    /* Close message port */
     if (bonami.port) {
         DeleteMsgPort(bonami.port);
     }
+    
+    /* Close libraries */
+    if (bonami.roadshow) {
+        CloseLibrary(bonami.roadshow);
+    }
+    if (bonami.bsdsocket) {
+        CloseLibrary(bonami.bsdsocket);
+    }
+    if (bonami.utility) {
+        CloseLibrary(bonami.utility);
+    }
+    if (bonami.dos) {
+        CloseLibrary(bonami.dos);
+    }
+    if (bonami.exec) {
+        CloseLibrary(bonami.exec);
+    }
+    
+    logMessage(LOG_INFO, "Bonami daemon cleaned up");
 }
 
 /* Network monitor task */
@@ -498,7 +727,7 @@ static LONG createMulticastSocket(void)
     }
     
     /* Set socket options */
-    mreq.imr_multiaddr.s_addr = MDNS_MULTICAST_ADDR;
+    mreq.imr_multiaddr.s_addr = inet_addr(MDNS_MULTICAST_ADDR);
     mreq.imr_interface.s_addr = INADDR_ANY;
     
     if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
@@ -717,7 +946,7 @@ static void sendMulticast(LONG sock, const UBYTE *data, LONG len)
     
     addr.sin_family = AF_INET;
     addr.sin_port = htons(MDNS_PORT);
-    addr.sin_addr.s_addr = MDNS_MULTICAST_ADDR;
+    addr.sin_addr.s_addr = inet_addr(MDNS_MULTICAST_ADDR);
     
     sendto(sock, data, len, 0, (struct sockaddr *)&addr, sizeof(addr));
 }
@@ -945,16 +1174,38 @@ static LONG validateServiceType(const char *type)
     return BONAMI_OK;
 }
 
-/* Main daemon loop */
-int main(void)
+/* Main function */
+int main(int argc, char *argv[])
 {
-    struct Message *msg;
+    LONG result;
+    struct Process *proc;
     
     /* Initialize daemon */
-    initDaemon();
+    result = initDaemon();
+    if (result != BONAMI_OK) {
+        return result;
+    }
     
-    /* Main message loop */
+    /* Start network monitor task */
+    proc = (struct Process *)FindTask(NULL);
+    proc->pr_Task.tc_Node.ln_Pri = 0;  /* Low priority for monitor */
+    CreateNewProcTags(NP_Entry, (ULONG)networkMonitorTask,
+                      NP_Name, (ULONG)"Bonami Network Monitor",
+                      NP_Priority, 0,
+                      TAG_DONE);
+    
+    /* Start discovery task */
+    proc->pr_Task.tc_Node.ln_Pri = 0;  /* Low priority for discovery */
+    CreateNewProcTags(NP_Entry, (ULONG)discoveryTask,
+                      NP_Name, (ULONG)"Bonami Discovery",
+                      NP_Priority, 0,
+                      TAG_DONE);
+    
+    /* Main daemon loop */
     while (bonami.running) {
+        struct Message *msg;
+        
+        /* Wait for message */
         msg = WaitPort(bonami.port);
         if (msg) {
             msg = GetMsg(bonami.port);
@@ -966,6 +1217,5 @@ int main(void)
     
     /* Cleanup */
     cleanupDaemon();
-    
-    return 0;
+    return BONAMI_OK;
 } 
