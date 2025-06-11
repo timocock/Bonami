@@ -2,18 +2,30 @@
 
 ## Introduction
 
-BonAmi is an mDNS (multicast DNS) and DNS-SD (DNS Service Discovery) implementation for AmigaOS, designed to provide service discovery capabilities similar to Apple's Bonjour. This guide will help you understand how to use the BonAmi library in your applications.
+BonAmi is an mDNS (multicast DNS) and DNS-SD (DNS Service Discovery) implementation for AmigaOS 3.x and 4.x, designed to provide service discovery capabilities similar to Apple's Bonjour. This guide will help you understand how to use the BonAmi library in your applications.
+
+## Architecture
+
+BonAmi follows a client-server architecture:
+
+- **Library (`bonami.library`)**: A thin client library that provides a simple API for applications to interact with the mDNS daemon. The library is stateless and handles message passing to the daemon.
+
+- **Daemon (`Bonami`)**: A background process that manages all mDNS operations, including:
+  - Service registration and discovery
+  - Network interface management
+  - State management
+  - Resource management
+  - Memory pools for long-lived objects
 
 ## Features
 
-- mDNS protocol implementation (RFC 6762)
-- DNS-SD support (RFC 6763)
 - Service registration and discovery
-- Service conflict resolution
-- Per-interface service management
-- DNS record caching
-- Host name management
-- IPv4 support (local network)
+- Support for TXT records
+- Automatic service conflict resolution
+- Service monitoring and updates
+- Thread-safe operations
+- Memory pool management
+- AmigaOS 3.x and 4.x support
 
 ## Getting Started
 
@@ -26,10 +38,17 @@ BonAmi is an mDNS (multicast DNS) and DNS-SD (DNS Service Discovery) implementat
 ### Initializing the Library
 
 ```c
-struct Library *BonamiBase = OpenLibrary("bonami.library", 0);
+struct Library *BonamiBase = OpenLibrary("bonami.library", 40);  /* Version 40 for AmigaOS 3.1 */
 if (!BonamiBase) {
     /* Handle error */
 }
+
+#ifdef __amigaos4__
+struct BonAmiIFace *IBonAmi = (struct BonAmiIFace *)GetInterface(BonamiBase, "main", 1, NULL);
+if (!IBonAmi) {
+    /* Handle error */
+}
+#endif
 ```
 
 ## Service Registration
@@ -37,12 +56,12 @@ if (!BonamiBase) {
 ### Registering a Service
 
 ```c
-struct BAService service;
-memset(&service, 0, sizeof(service));
-strncpy(service.name, "My Service", BA_MAX_NAME_LEN - 1);
-strncpy(service.type, "_http._tcp.local", BA_MAX_SERVICE_LEN - 1);
-service.port = 80;
-service.txt = NULL;  /* Optional TXT record */
+struct BAService service = {
+    .name = "My Service",
+    .type = "_http._tcp",
+    .port = 80,
+    .txt = "path=/"
+};
 
 LONG result = BARegisterService(&service);
 if (result != BA_OK) {
@@ -50,15 +69,10 @@ if (result != BA_OK) {
 }
 ```
 
-The registration process follows these steps:
-1. Service name conflict probing
-2. Service announcement
-3. Active service state
-
 ### Unregistering a Service
 
 ```c
-LONG result = BAUnregisterService("My Service", "_http._tcp.local");
+LONG result = BAUnregisterService("My Service", "_http._tcp");
 if (result != BA_OK) {
     /* Handle error */
 }
@@ -69,11 +83,11 @@ if (result != BA_OK) {
 ### Starting Discovery
 
 ```c
-struct BADiscovery discovery;
-memset(&discovery, 0, sizeof(discovery));
-strncpy(discovery.type, "_http._tcp.local", BA_MAX_SERVICE_LEN - 1);
-discovery.callback = myCallback;
-discovery.userData = NULL;
+struct BADiscovery discovery = {
+    .type = "_http._tcp",
+    .callback = myCallback,
+    .userData = NULL
+};
 
 LONG result = BAStartDiscovery(&discovery);
 if (result != BA_OK) {
@@ -84,12 +98,13 @@ if (result != BA_OK) {
 ### Discovery Callback
 
 ```c
-void myCallback(const struct BAService *service, void *userData)
+void myCallback(struct BAService *service, APTR userData)
 {
     /* Handle discovered service */
     printf("Found service: %s\n", service->name);
     printf("Type: %s\n", service->type);
-    printf("Port: %ld\n", service->port);
+    printf("Port: %d\n", service->port);
+    printf("TXT: %s\n", service->txt);
 }
 ```
 
@@ -108,40 +123,32 @@ if (result != BA_OK) {
 
 ```c
 struct BAService service;
-LONG result = BAResolveService("My Service", "_http._tcp.local", &service);
+LONG result = BAResolveService("My Service", "_http._tcp", &service);
 if (result != BA_OK) {
     /* Handle error */
 }
 ```
 
-## Service Type Enumeration
+## TXT Records
 
-### Enumerating Service Types
+### Creating TXT Records
 
 ```c
-struct List types;
-NewList(&types);
-LONG result = BAEnumerateServiceTypes(&types);
-if (result != BA_OK) {
+STRPTR txt = BACreateTXTRecord("path", "/");
+if (!txt) {
     /* Handle error */
 }
-```
 
-## DNS Queries
+/* Use TXT record */
+struct BAService service = {
+    .name = "My Service",
+    .type = "_http._tcp",
+    .port = 80,
+    .txt = txt
+};
 
-### Performing DNS Queries
-
-```c
-void *result;
-LONG resultlen = 1024;
-result = AllocMem(resultlen, MEMF_CLEAR);
-if (result) {
-    LONG count = BAQueryRecord("example.local", DNS_TYPE_A, DNS_CLASS_IN, result, resultlen);
-    if (count < 0) {
-        /* Handle error */
-    }
-    FreeMem(result, resultlen);
-}
+/* Free TXT record when done */
+BAFreeTXTRecord(txt);
 ```
 
 ## Error Handling
@@ -149,21 +156,13 @@ if (result) {
 BonAmi uses the following error codes:
 
 - `BA_OK`: Operation successful
-- `BA_BADPARAM`: Invalid parameter
 - `BA_NOMEM`: Out of memory
-- `BA_TIMEOUT`: Operation timed out
+- `BA_INVALID`: Invalid parameter
 - `BA_DUPLICATE`: Service already registered
 - `BA_NOTFOUND`: Service not found
-- `BA_BADTYPE`: Invalid service type
-- `BA_BADNAME`: Invalid service name
-- `BA_BADPORT`: Invalid port number
-- `BA_BADTXT`: Invalid TXT record
-- `BA_BADQUERY`: Invalid DNS query
-- `BA_BADRESPONSE`: Invalid DNS response
+- `BA_TIMEOUT`: Operation timed out
 - `BA_NETWORK`: Network error
-- `BA_NOTREADY`: Network not ready
-- `BA_BUSY`: Operation in progress
-- `BA_CANCELLED`: Operation cancelled
+- `BA_VERSION`: Version mismatch
 
 ## Best Practices
 
@@ -174,7 +173,7 @@ BonAmi uses the following error codes:
 
 2. **Service Types**
    - Use standard service types when available
-   - Follow the `_service._tcp.local` format
+   - Follow the `_service._tcp` format
    - Register new types with IANA
 
 3. **Error Handling**
@@ -186,11 +185,12 @@ BonAmi uses the following error codes:
    - Unregister services when done
    - Stop discovery when no longer needed
    - Free allocated memory
+   - Close library properly
 
-5. **Network Considerations**
-   - Handle network state changes
-   - Consider service conflicts
-   - Monitor interface status
+5. **AmigaOS 4.x Support**
+   - Use interface-based calls
+   - Handle interface versioning
+   - Clean up interfaces properly
 
 ## Complete Example
 
@@ -200,49 +200,57 @@ Here's a complete example of a service registration and discovery:
 #include <proto/bonami.h>
 #include <stdio.h>
 
-void serviceCallback(const struct BAService *service, void *userData)
+void serviceCallback(struct BAService *service, APTR userData)
 {
     printf("Found service: %s\n", service->name);
     printf("Type: %s\n", service->type);
-    printf("Port: %ld\n", service->port);
+    printf("Port: %d\n", service->port);
+    printf("TXT: %s\n", service->txt);
 }
 
 int main(void)
 {
-    struct Library *BonamiBase = OpenLibrary("bonami.library", 0);
+    struct Library *BonamiBase = OpenLibrary("bonami.library", 40);
     if (!BonamiBase) {
         printf("Failed to open bonami.library\n");
         return 1;
     }
     
+#ifdef __amigaos4__
+    struct BonAmiIFace *IBonAmi = (struct BonAmiIFace *)GetInterface(BonamiBase, "main", 1, NULL);
+    if (!IBonAmi) {
+        printf("Failed to get interface\n");
+        CloseLibrary(BonamiBase);
+        return 1;
+    }
+#endif
+    
     /* Register a service */
-    struct BAService service;
-    memset(&service, 0, sizeof(service));
-    strncpy(service.name, "My Web Server", BA_MAX_NAME_LEN - 1);
-    strncpy(service.type, "_http._tcp.local", BA_MAX_SERVICE_LEN - 1);
-    service.port = 80;
-    service.txt = NULL;
+    struct BAService service = {
+        .name = "My Web Server",
+        .type = "_http._tcp",
+        .port = 80,
+        .txt = "path=/"
+    };
     
     LONG result = BARegisterService(&service);
     if (result != BA_OK) {
         printf("Failed to register service: %ld\n", result);
-        CloseLibrary(BonamiBase);
-        return 1;
+        goto cleanup;
     }
     
     /* Start discovery */
-    struct BADiscovery discovery;
-    memset(&discovery, 0, sizeof(discovery));
-    strncpy(discovery.type, "_http._tcp.local", BA_MAX_SERVICE_LEN - 1);
-    discovery.callback = serviceCallback;
-    discovery.userData = NULL;
+    struct BADiscovery discovery = {
+        .type = "_http._tcp",
+        .callback = serviceCallback,
+        .userData = NULL
+    };
     
     result = BAStartDiscovery(&discovery);
     if (result != BA_OK) {
         printf("Failed to start discovery: %ld\n", result);
         BAUnregisterService(service.name, service.type);
-        CloseLibrary(BonamiBase);
-        return 1;
+        goto cleanup;
     }
     
     /* Wait for discoveries */
@@ -252,45 +260,16 @@ int main(void)
     /* Cleanup */
     BAStopDiscovery(&discovery);
     BAUnregisterService(service.name, service.type);
+    
+cleanup:
+#ifdef __amigaos4__
+    DropInterface((struct Interface *)IBonAmi);
+#endif
     CloseLibrary(BonamiBase);
     
     return 0;
 }
 ```
-
-## Advanced Features
-
-### Service Conflict Resolution
-
-BonAmi implements proper service conflict resolution:
-1. Probing phase to check for conflicts
-2. Multiple probe attempts
-3. Automatic conflict detection
-4. Service state management
-
-### TTL Management
-
-The daemon handles TTL (Time To Live) properly:
-1. Service announcement phase
-2. Multiple announcement attempts
-3. Record refreshing
-4. Cache management
-
-### Interface Management
-
-BonAmi supports multiple network interfaces:
-1. Per-interface service tracking
-2. Link-local detection
-3. Interface state monitoring
-4. Automatic service updates
-
-### DNS Record Caching
-
-The daemon implements DNS record caching:
-1. TTL-based expiration
-2. Automatic cache cleanup
-3. Record refreshing
-4. Memory-efficient storage
 
 ## Troubleshooting
 
@@ -313,14 +292,6 @@ The daemon implements DNS record caching:
    - Verify multicast support
    - Check firewall settings
    - Verify network configuration
-
-### Debugging
-
-Enable debug logging by setting the log level in the configuration file:
-```
-SYS:Utilities/BonAmi/config
-3  # LOG_DEBUG level
-```
 
 ## Contributing
 
