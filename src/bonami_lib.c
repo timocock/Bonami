@@ -7,6 +7,7 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/bsdsocket.h>
+#include <proto/roadshow.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -28,6 +29,10 @@
 #define BONAMI_MSG_MONITOR     8
 #define BONAMI_MSG_BATCH       9
 #define BONAMI_MSG_CONFIG      10
+#define BONAMI_MSG_INTERFACES  11
+#define BONAMI_MSG_SET_INTERFACE 12
+#define BONAMI_MSG_REGISTER_CALLBACK 13
+#define BONAMI_MSG_UNREGISTER_CALLBACK 14
 
 /* Message structure for daemon communication */
 struct BonamiMessage {
@@ -72,6 +77,19 @@ struct BonamiMessage {
         struct {
             struct BonamiConfig config;
         } config_msg;
+        struct {
+            struct BonamiInterface interfaces[256];
+            ULONG numInterfaces;
+        } interfaces_msg;
+        struct {
+            char name[256];
+        } interface_msg;
+        struct {
+            const char *name;
+            const char *type;
+            BonamiServiceCallback callback;
+            APTR userData;
+        } callback_msg;
     } data;
 };
 
@@ -511,4 +529,228 @@ void CloseLibrary(void)
 void ExpungeLibrary(void)
 {
     /* Nothing to do here */
+}
+
+/* Resolve service */
+LONG BonamiResolveService(const char *name,
+                         const char *type,
+                         struct BonamiService *service)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMessage *msg;
+    struct hostent *host;
+    
+    if (!name || !type || !service) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Allocate message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->type = BONAMI_MSG_RESOLVE;
+    strncpy(msg->data.resolve_msg.name, name, sizeof(msg->data.resolve_msg.name) - 1);
+    strncpy(msg->data.resolve_msg.type, type, sizeof(msg->data.resolve_msg.type) - 1);
+    msg->data.resolve_msg.result = service;
+    
+    /* Send to daemon */
+    LONG result = sendMessage(base, msg);
+    if (result == BONAMI_OK) {
+        /* Resolve hostname to IP address */
+        host = gethostbyname(service->hostname);
+        if (host) {
+            memcpy(&service->addr, host->h_addr, sizeof(struct in_addr));
+        } else {
+            result = BONAMI_RESOLVE;
+        }
+    }
+    
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    return result;
+}
+
+/* Create TXT record */
+struct BonamiTXTRecord *BonamiCreateTXTRecord(const char *key,
+                                            const char *value)
+{
+    struct BonamiTXTRecord *record;
+    
+    if (!key || !value) {
+        return NULL;
+    }
+    
+    /* Allocate record */
+    record = AllocMem(sizeof(struct BonamiTXTRecord), MEMF_CLEAR);
+    if (!record) {
+        return NULL;
+    }
+    
+    /* Copy key and value */
+    strncpy(record->key, key, sizeof(record->key) - 1);
+    strncpy(record->value, value, sizeof(record->value) - 1);
+    
+    return record;
+}
+
+/* Free TXT record */
+void BonamiFreeTXTRecord(struct BonamiTXTRecord *record)
+{
+    if (record) {
+        FreeMem(record, sizeof(struct BonamiTXTRecord));
+    }
+}
+
+/* Get interface list */
+LONG BonamiGetInterfaces(struct BonamiInterface *interfaces,
+                        ULONG *numInterfaces)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMessage *msg;
+    
+    if (!interfaces || !numInterfaces) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Allocate message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->type = BONAMI_MSG_INTERFACES;
+    msg->data.interfaces_msg.interfaces = interfaces;
+    msg->data.interfaces_msg.numInterfaces = *numInterfaces;
+    
+    /* Send to daemon */
+    LONG result = sendMessage(base, msg);
+    if (result == BONAMI_OK) {
+        *numInterfaces = msg->data.interfaces_msg.numInterfaces;
+    }
+    
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    return result;
+}
+
+/* Set preferred interface */
+LONG BonamiSetPreferredInterface(const char *interface)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMessage *msg;
+    
+    if (!interface) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Allocate message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->type = BONAMI_MSG_SET_INTERFACE;
+    strncpy(msg->data.interface_msg.name, interface, sizeof(msg->data.interface_msg.name) - 1);
+    
+    /* Send to daemon */
+    LONG result = sendMessage(base, msg);
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    
+    return result;
+}
+
+/* Update service */
+LONG BonamiUpdateService(const char *name,
+                        const char *type,
+                        struct BonamiTXTRecord *txt)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMessage *msg;
+    
+    if (!name || !type || !txt) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Allocate message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->type = BONAMI_MSG_UPDATE;
+    strncpy(msg->data.update_msg.name, name, sizeof(msg->data.update_msg.name) - 1);
+    strncpy(msg->data.update_msg.type, type, sizeof(msg->data.update_msg.type) - 1);
+    memcpy(&msg->data.update_msg.txt, txt, sizeof(struct BonamiTXTRecord));
+    
+    /* Send to daemon */
+    LONG result = sendMessage(base, msg);
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    
+    return result;
+}
+
+/* Register service update callback */
+LONG BonamiRegisterUpdateCallback(const char *name,
+                                const char *type,
+                                BonamiServiceCallback cb,
+                                APTR userData)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMessage *msg;
+    
+    if (!name || !type || !cb) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Allocate message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->type = BONAMI_MSG_REGISTER_CALLBACK;
+    strncpy(msg->data.callback_msg.name, name, sizeof(msg->data.callback_msg.name) - 1);
+    strncpy(msg->data.callback_msg.type, type, sizeof(msg->data.callback_msg.type) - 1);
+    msg->data.callback_msg.callback = cb;
+    msg->data.callback_msg.userData = userData;
+    
+    /* Send to daemon */
+    LONG result = sendMessage(base, msg);
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    
+    return result;
+}
+
+/* Unregister service update callback */
+LONG BonamiUnregisterUpdateCallback(const char *name,
+                                  const char *type)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMessage *msg;
+    
+    if (!name || !type) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Allocate message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->type = BONAMI_MSG_UNREGISTER_CALLBACK;
+    strncpy(msg->data.callback_msg.name, name, sizeof(msg->data.callback_msg.name) - 1);
+    strncpy(msg->data.callback_msg.type, type, sizeof(msg->data.callback_msg.type) - 1);
+    
+    /* Send to daemon */
+    LONG result = sendMessage(base, msg);
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    
+    return result;
 } 

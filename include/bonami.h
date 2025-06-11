@@ -9,6 +9,7 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/bsdsocket.h>
+#include <netinet/in.h>
 
 /* Version information */
 #define BONAMI_VERSION    1
@@ -43,13 +44,17 @@
 #define BONAMI_SERVICE_FTP     "_ftp._tcp"
 #define BONAMI_SERVICE_SMB     "_smb._tcp"
 #define BONAMI_SERVICE_AFP     "_afp._tcp"
+#define BONAMI_SERVICE_SSH     "_ssh._tcp"
+#define BONAMI_SERVICE_PRINT   "_printer._tcp"
 
 /* Structure for service registration */
 struct BonamiService {
     char name[BONAMI_MAX_NAME_LEN];
     char type[BONAMI_MAX_SERVICE_LEN];
+    char hostname[BONAMI_MAX_NAME_LEN];
+    struct in_addr addr;
     UWORD port;
-    struct BonamiTXTRecord txt;
+    struct BonamiTXTRecord *txt;
 };
 
 /* Structure for service discovery */
@@ -87,8 +92,59 @@ struct BonamiBase {
 
 /* TXT record structure */
 struct BonamiTXTRecord {
-    UBYTE *data;
-    ULONG length;
+    char key[BONAMI_MAX_TXT_LEN];
+    char value[BONAMI_MAX_TXT_LEN];
+    struct BonamiTXTRecord *next;
+};
+
+/* Discovery structure */
+struct BonamiDiscovery {
+    char type[BONAMI_MAX_SERVICE_LEN];
+    void (*callback)(struct BonamiService *service, APTR userData);
+    APTR userData;
+};
+
+/* Filter structure */
+struct BonamiFilter {
+    char txtKey[BONAMI_MAX_TXT_LEN];
+    char txtValue[BONAMI_MAX_TXT_LEN];
+    BOOL wildcard;
+};
+
+/* Monitor structure */
+struct BonamiMonitor {
+    struct Node node;
+    char name[BONAMI_MAX_NAME_LEN];
+    char type[BONAMI_MAX_SERVICE_LEN];
+    LONG checkInterval;
+    BOOL notifyOffline;
+    BOOL running;
+    void (*callback)(struct BonamiService *service, APTR userData);
+    APTR userData;
+};
+
+/* Batch structure */
+struct BonamiBatch {
+    struct BonamiService *services;
+    ULONG numServices;
+    ULONG maxServices;
+};
+
+/* Interface structure */
+struct BonamiInterface {
+    char name[BONAMI_MAX_NAME_LEN];
+    struct in_addr addr;
+    struct in_addr netmask;
+    BOOL up;
+    BOOL preferred;
+};
+
+/* Configuration structure */
+struct BonamiConfig {
+    LONG discoveryTimeout;
+    LONG resolveTimeout;
+    LONG ttl;
+    BOOL autoReconnect;
 };
 
 #ifdef __cplusplus
@@ -117,6 +173,40 @@ LONG BonamiUpdateServiceTXT(const char *name, const char *type, const char *txt)
 
 /* New: Update/rename a registered service */
 LONG BonamiUpdateService(struct BonamiService *service);
+
+/* New: Resolve a service */
+LONG BonamiResolveService(const char *name, const char *type, struct BonamiService *service);
+
+/* New: Start filtered discovery */
+LONG BonamiStartFilteredDiscovery(const char *type, struct BonamiFilter *filter, void (*callback)(struct BonamiService *service, APTR userData), APTR userData);
+
+/* New: Monitor a service */
+LONG BonamiMonitorService(const char *name, const char *type, LONG checkInterval, BOOL notifyOffline);
+
+/* New: Get services */
+LONG BonamiGetServices(const char *type, struct BonamiService *services, ULONG *numServices);
+
+/* New: Set configuration */
+LONG BonamiSetConfig(struct BonamiConfig *config);
+
+/* New: Get configuration */
+LONG BonamiGetConfig(struct BonamiConfig *config);
+
+/* New: Get interfaces */
+LONG BonamiGetInterfaces(struct BonamiInterface *interfaces, ULONG *numInterfaces);
+
+/* New: Set preferred interface */
+LONG BonamiSetPreferredInterface(const char *interface);
+
+/* New: Register update callback */
+LONG BonamiRegisterUpdateCallback(const char *name, const char *type, void (*callback)(struct BonamiService *service, APTR userData), APTR userData);
+
+/* New: Unregister update callback */
+LONG BonamiUnregisterUpdateCallback(const char *name, const char *type);
+
+/* TXT record functions */
+struct BonamiTXTRecord *BonamiCreateTXTRecord(const char *key, const char *value);
+void BonamiFreeTXTRecord(struct BonamiTXTRecord *record);
 
 #ifdef __cplusplus
 }
