@@ -96,6 +96,7 @@ struct BonamiMessage {
 /* Library base structure */
 struct BonamiBase {
     struct Library lib;
+    struct SignalSemaphore sem;
     struct MsgPort *replyPort;
     struct MsgPort *daemonPort;
     struct List *monitors;      // List of monitored services
@@ -108,19 +109,108 @@ static LONG waitReply(struct BonamiBase *base, struct BonamiMessage *msg);
 static void monitorTask(void *arg);
 static BOOL matchFilter(struct BonamiService *service, struct BonamiFilter *filter);
 
+/* Library open */
+struct Library *OpenLibrary(void)
+{
+    struct BonamiBase *base;
+    
+    /* Allocate library base */
+    base = (struct BonamiBase *)AllocMem(sizeof(struct BonamiBase), MEMF_CLEAR | MEMF_PUBLIC);
+    if (!base) {
+        return NULL;
+    }
+    
+    /* Initialize library */
+    base->lib.lib_Node.ln_Type = NT_LIBRARY;
+    base->lib.lib_Node.ln_Name = "bonami.library";
+    base->lib.lib_Flags = LIBF_SUMUSED | LIBF_CHANGED;
+    base->lib.lib_Version = LIB_VERSION;
+    base->lib.lib_Revision = LIB_REVISION;
+    base->lib.lib_IdString = "BonAmi mDNS Library";
+    
+    /* Initialize semaphore */
+    InitSemaphore(&base->sem);
+    
+    /* Create reply port */
+    base->replyPort = CreateMsgPort();
+    if (!base->replyPort) {
+        FreeMem(base, sizeof(struct BonamiBase));
+        return NULL;
+    }
+    
+    /* Find daemon port */
+    base->daemonPort = FindPort("Bonami");
+    if (!base->daemonPort) {
+        DeleteMsgPort(base->replyPort);
+        FreeMem(base, sizeof(struct BonamiBase));
+        return NULL;
+    }
+    
+    /* Initialize monitor list */
+    base->monitors = AllocMem(sizeof(struct List), MEMF_CLEAR);
+    if (!base->monitors) {
+        DeleteMsgPort(base->replyPort);
+        FreeMem(base, sizeof(struct BonamiBase));
+        return NULL;
+    }
+    NewList(base->monitors);
+    
+    /* Initialize default configuration */
+    base->config.discoveryTimeout = 5;    // 5 seconds
+    base->config.resolveTimeout = 2;      // 2 seconds
+    base->config.ttl = 120;               // 2 minutes
+    base->config.autoReconnect = TRUE;
+    
+    return (struct Library *)base;
+}
+
+/* Library close */
+void CloseLibrary(void)
+{
+    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
+    struct BonamiMonitor *monitor;
+    
+    /* Stop all monitors */
+    while ((monitor = (struct BonamiMonitor *)RemHead(base->monitors))) {
+        monitor->running = FALSE;
+        FreeMem(monitor, sizeof(struct BonamiMonitor));
+    }
+    
+    if (base->monitors) {
+        FreeMem(base->monitors, sizeof(struct List));
+    }
+    
+    if (base->replyPort) {
+        DeleteMsgPort(base->replyPort);
+    }
+    
+    FreeMem(base, sizeof(struct BonamiBase));
+}
+
+/* Library expunge */
+void ExpungeLibrary(void)
+{
+    /* Nothing to do here */
+}
+
 /* Service registration */
 LONG BonamiRegisterService(struct BonamiService *service)
 {
     struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
     struct BonamiMessage *msg;
+    LONG result;
     
     if (!service || !service->name[0] || !service->type[0]) {
         return BONAMI_BADPARAM;
     }
     
+    /* Obtain semaphore */
+    ObtainSemaphore(&base->sem);
+    
     /* Allocate message */
     msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
     if (!msg) {
+        ReleaseSemaphore(&base->sem);
         return BONAMI_NOMEM;
     }
     
@@ -129,8 +219,11 @@ LONG BonamiRegisterService(struct BonamiService *service)
     memcpy(&msg->data.register_msg.service, service, sizeof(struct BonamiService));
     
     /* Send to daemon */
-    LONG result = sendMessage(base, msg);
+    result = sendMessage(base, msg);
     FreeMem(msg, sizeof(struct BonamiMessage));
+    
+    /* Release semaphore */
+    ReleaseSemaphore(&base->sem);
     
     return result;
 }
@@ -451,84 +544,6 @@ static void monitorTask(void *arg)
         /* Wait for next check */
         Delay(monitor->checkInterval * 50);  // Convert to ticks
     }
-}
-
-/* Library open */
-struct Library *OpenLibrary(void)
-{
-    struct BonamiBase *base = (struct BonamiBase *)AllocMem(sizeof(struct BonamiBase), MEMF_CLEAR);
-    if (!base) {
-        return NULL;
-    }
-    
-    /* Initialize library */
-    base->lib.lib_Node.ln_Type = NT_LIBRARY;
-    base->lib.lib_Node.ln_Name = "bonami.library";
-    base->lib.lib_Flags = LIBF_SUMUSED | LIBF_CHANGED;
-    base->lib.lib_Version = LIB_VERSION;
-    base->lib.lib_Revision = LIB_REVISION;
-    base->lib.lib_IdString = "BonAmi mDNS Library";
-    
-    /* Create reply port */
-    base->replyPort = CreateMsgPort();
-    if (!base->replyPort) {
-        FreeMem(base, sizeof(struct BonamiBase));
-        return NULL;
-    }
-    
-    /* Find daemon port */
-    base->daemonPort = FindPort("Bonami");
-    if (!base->daemonPort) {
-        DeleteMsgPort(base->replyPort);
-        FreeMem(base, sizeof(struct BonamiBase));
-        return NULL;
-    }
-    
-    /* Initialize monitor list */
-    base->monitors = AllocMem(sizeof(struct List), MEMF_CLEAR);
-    if (!base->monitors) {
-        DeleteMsgPort(base->replyPort);
-        FreeMem(base, sizeof(struct BonamiBase));
-        return NULL;
-    }
-    NewList(base->monitors);
-    
-    /* Initialize default configuration */
-    base->config.discoveryTimeout = 5;    // 5 seconds
-    base->config.resolveTimeout = 2;      // 2 seconds
-    base->config.ttl = 120;               // 2 minutes
-    base->config.autoReconnect = TRUE;
-    
-    return (struct Library *)base;
-}
-
-/* Library close */
-void CloseLibrary(void)
-{
-    struct BonamiBase *base = (struct BonamiBase *)SysBase->LibNode;
-    struct BonamiMonitor *monitor;
-    
-    /* Stop all monitors */
-    while ((monitor = (struct BonamiMonitor *)RemHead(base->monitors))) {
-        monitor->running = FALSE;
-        FreeMem(monitor, sizeof(struct BonamiMonitor));
-    }
-    
-    if (base->monitors) {
-        FreeMem(base->monitors, sizeof(struct List));
-    }
-    
-    if (base->replyPort) {
-        DeleteMsgPort(base->replyPort);
-    }
-    
-    FreeMem(base, sizeof(struct BonamiBase));
-}
-
-/* Library expunge */
-void ExpungeLibrary(void)
-{
-    /* Nothing to do here */
 }
 
 /* Resolve service */

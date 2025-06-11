@@ -1,34 +1,60 @@
-# SAS/C SMAKEFILE for BonAmi
+# BonAmi mDNS Library and Daemon
+# Copyright (C) 2024 Tim
 
 # Compiler and flags
-CC = sc
-CFLAGS = OPTIMIZE OPTGO OPTINLINE OPTDEPTH=8 OPTVERBOSE OPTWARN=2
-INCLUDES = -i=include
+CC = gcc
+CFLAGS = -mcrt=clib2 -O2 -Wall -Werror -std=c89 -D__USE_INLINE__ -D__USE_BASETYPE__
+LDFLAGS = -mcrt=clib2
 
 # Directories
 SRC_DIR = src
+INCLUDE_DIR = include
 OBJ_DIR = obj
+LIB_DIR = lib
 BIN_DIR = bin
 
 # Source files
-SRCS = $(SRC_DIR)/bonamid.c $(SRC_DIR)/dns.c
-OBJS = $(SRC_DIR)/bonamid.o $(SRC_DIR)/dns.o
+LIB_SRCS = $(SRC_DIR)/bonami_lib.c
+DAEMON_SRCS = $(SRC_DIR)/bonami.c
+
+# Object files
+LIB_OBJS = $(LIB_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+DAEMON_OBJS = $(DAEMON_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+
+# Targets
+LIB_TARGET = $(LIB_DIR)/bonami.library
+DAEMON_TARGET = $(BIN_DIR)/bonamid
 
 # Default target
-all: $(BIN_DIR)/bonamid
+all: directories $(LIB_TARGET) $(DAEMON_TARGET)
 
-# Create binary directory
-$(BIN_DIR):
-    mkdir $(BIN_DIR)
+# Create directories
+directories:
+	@mkdir -p $(OBJ_DIR) $(LIB_DIR) $(BIN_DIR)
 
-# Link the daemon
-$(BIN_DIR)/bonamid: $(OBJS) | $(BIN_DIR)
-    $(CC) LINK $(OBJS) TO $@ LIBRARY lib:sc.lib lib:amiga.lib
+# Build library
+$(LIB_TARGET): $(LIB_OBJS)
+	$(CC) $(LDFLAGS) -nostartfiles -o $@ $(LIB_OBJS) -ldebug
 
-# Compile source files
-$(SRC_DIR)/%.o: $(SRC_DIR)/%.c
-    $(CC) $(CFLAGS) $(INCLUDES) $<
+# Build daemon
+$(DAEMON_TARGET): $(DAEMON_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $(DAEMON_OBJS) -ldebug
 
-# Clean target
+# Compile library objects
+$(OBJ_DIR)/bonami_lib.o: $(SRC_DIR)/bonami_lib.c $(INCLUDE_DIR)/bonami.h
+	$(CC) $(CFLAGS) -I$(INCLUDE_DIR) -c $< -o $@
+
+# Compile daemon objects
+$(OBJ_DIR)/bonami.o: $(SRC_DIR)/bonami.c $(INCLUDE_DIR)/bonami.h
+	$(CC) $(CFLAGS) -I$(INCLUDE_DIR) -c $< -o $@
+
+# Clean
 clean:
-    delete $(OBJS) $(BIN_DIR)/bonamid 
+	rm -rf $(OBJ_DIR) $(LIB_DIR) $(BIN_DIR)
+
+# Install
+install: all
+	cp $(LIB_TARGET) LIBS:
+	cp $(DAEMON_TARGET) C:
+
+.PHONY: all clean install directories 
