@@ -39,13 +39,13 @@
 #define BA_MAX_TXT_LEN     256
 #define BA_MAX_RECORDS     32
 
-/* Service types */
-#define BA_SERVICE_HTTP    "_http._tcp"
-#define BA_SERVICE_FTP     "_ftp._tcp"
-#define BA_SERVICE_SMB     "_smb._tcp"
-#define BA_SERVICE_AFP     "_afp._tcp"
-#define BA_SERVICE_SSH     "_ssh._tcp"
-#define BA_SERVICE_PRINT   "_printer._tcp"
+/* Service type format:
+ * - Must start with underscore (_)
+ * - Followed by service name (e.g., http, ftp, printer)
+ * - Followed by underscore and transport protocol (_tcp or _udp)
+ * - For DNS-SD, append .local
+ * Example: _http._tcp.local
+ */
 
 /* Callback type for service updates */
 typedef void (*BAServiceCallback)(struct BAService *service, APTR userData);
