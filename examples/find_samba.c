@@ -8,6 +8,9 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Version string */
+static const char *version = "$VER: find_samba 40.0 (01.01.2024)";
+
 /* Command line template */
 static const char *template = "TIMEOUT/N";
 
@@ -33,7 +36,7 @@ int main(int argc, char *argv[])
     NewList(&services);
     
     /* Open bonami.library */
-    struct Library *bonamiBase = OpenLibrary("bonami.library", 0);
+    struct Library *bonamiBase = OpenLibrary("bonami.library", 40);
     if (!bonamiBase) {
         printf("Error: Failed to open bonami.library\n");
         return 1;

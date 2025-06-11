@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Version string */
+static const char *version = "$VER: test_bonami 40.0 (01.01.2024)";
+
 /* Test configuration */
 #define TEST_SERVICE_NAME "test-service"
 #define TEST_SERVICE_TYPE "_test._tcp"
@@ -118,7 +121,7 @@ static LONG runTest(const char *name, LONG (*testFunc)(struct TestState *))
 static LONG testLibraryOpen(struct TestState *state)
 {
     /* Open library */
-    state->BonAmiBase = OpenLibrary("bonami.library", 0);
+    state->BonAmiBase = OpenLibrary("bonami.library", 40);
     if (!state->BonAmiBase) {
         printf("Failed to open bonami.library\n");
         return RETURN_ERROR;
