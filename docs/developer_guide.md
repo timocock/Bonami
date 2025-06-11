@@ -37,14 +37,15 @@ if (!BonamiBase) {
 ### Registering a Service
 
 ```c
-struct BonamiService service;
-service.name = "My Service";
-service.type = "_http._tcp.local";
+struct BAService service;
+memset(&service, 0, sizeof(service));
+strncpy(service.name, "My Service", BA_MAX_NAME_LEN - 1);
+strncpy(service.type, "_http._tcp.local", BA_MAX_SERVICE_LEN - 1);
 service.port = 80;
 service.txt = NULL;  /* Optional TXT record */
 
-LONG result = BonamiRegisterService(&service);
-if (result != BONAMI_OK) {
+LONG result = BARegisterService(&service);
+if (result != BA_OK) {
     /* Handle error */
 }
 ```
@@ -57,8 +58,8 @@ The registration process follows these steps:
 ### Unregistering a Service
 
 ```c
-LONG result = BonamiUnregisterService("My Service", "_http._tcp.local");
-if (result != BONAMI_OK) {
+LONG result = BAUnregisterService("My Service", "_http._tcp.local");
+if (result != BA_OK) {
     /* Handle error */
 }
 ```
@@ -68,13 +69,14 @@ if (result != BONAMI_OK) {
 ### Starting Discovery
 
 ```c
-struct BonamiDiscovery discovery;
-discovery.type = "_http._tcp.local";
+struct BADiscovery discovery;
+memset(&discovery, 0, sizeof(discovery));
+strncpy(discovery.type, "_http._tcp.local", BA_MAX_SERVICE_LEN - 1);
 discovery.callback = myCallback;
 discovery.userData = NULL;
 
-LONG result = BonamiStartDiscovery(&discovery);
-if (result != BONAMI_OK) {
+LONG result = BAStartDiscovery(&discovery);
+if (result != BA_OK) {
     /* Handle error */
 }
 ```
@@ -82,7 +84,7 @@ if (result != BONAMI_OK) {
 ### Discovery Callback
 
 ```c
-void myCallback(const struct BonamiService *service, void *userData)
+void myCallback(const struct BAService *service, void *userData)
 {
     /* Handle discovered service */
     printf("Found service: %s\n", service->name);
@@ -94,8 +96,8 @@ void myCallback(const struct BonamiService *service, void *userData)
 ### Stopping Discovery
 
 ```c
-LONG result = BonamiStopDiscovery("_http._tcp.local");
-if (result != BONAMI_OK) {
+LONG result = BAStopDiscovery(&discovery);
+if (result != BA_OK) {
     /* Handle error */
 }
 ```
@@ -105,9 +107,9 @@ if (result != BONAMI_OK) {
 ### Resolving a Service
 
 ```c
-struct BonamiService service;
-LONG result = BonamiResolveService("My Service", "_http._tcp.local", &service);
-if (result != BONAMI_OK) {
+struct BAService service;
+LONG result = BAResolveService("My Service", "_http._tcp.local", &service);
+if (result != BA_OK) {
     /* Handle error */
 }
 ```
@@ -117,9 +119,10 @@ if (result != BONAMI_OK) {
 ### Enumerating Service Types
 
 ```c
-struct BonamiServiceType types[10];
-LONG count = BonamiEnumerateServiceTypes(types, 10);
-if (count < 0) {
+struct List types;
+NewList(&types);
+LONG result = BAEnumerateServiceTypes(&types);
+if (result != BA_OK) {
     /* Handle error */
 }
 ```
@@ -129,10 +132,15 @@ if (count < 0) {
 ### Performing DNS Queries
 
 ```c
-struct DNSRecord records[10];
-LONG count = BonamiQueryDNS("example.local", DNS_TYPE_A, DNS_CLASS_IN, records, 10);
-if (count < 0) {
-    /* Handle error */
+void *result;
+LONG resultlen = 1024;
+result = AllocMem(resultlen, MEMF_CLEAR);
+if (result) {
+    LONG count = BAQueryRecord("example.local", DNS_TYPE_A, DNS_CLASS_IN, result, resultlen);
+    if (count < 0) {
+        /* Handle error */
+    }
+    FreeMem(result, resultlen);
 }
 ```
 
@@ -140,18 +148,22 @@ if (count < 0) {
 
 BonAmi uses the following error codes:
 
-- `BONAMI_OK`: Operation successful
-- `BONAMI_ERROR`: General error
-- `BONAMI_NOMEM`: Out of memory
-- `BONAMI_BADPARAM`: Invalid parameter
-- `BONAMI_BADNAME`: Invalid service name
-- `BONAMI_BADTYPE`: Invalid service type
-- `BONAMI_BADPORT`: Invalid port number
-- `BONAMI_CONFLICT`: Service name conflict
-- `BONAMI_NETWORK`: Network error
-- `BONAMI_TIMEOUT`: Operation timed out
-- `BONAMI_BADQUERY`: Invalid DNS query
-- `BONAMI_BADRESPONSE`: Invalid DNS response
+- `BA_OK`: Operation successful
+- `BA_BADPARAM`: Invalid parameter
+- `BA_NOMEM`: Out of memory
+- `BA_TIMEOUT`: Operation timed out
+- `BA_DUPLICATE`: Service already registered
+- `BA_NOTFOUND`: Service not found
+- `BA_BADTYPE`: Invalid service type
+- `BA_BADNAME`: Invalid service name
+- `BA_BADPORT`: Invalid port number
+- `BA_BADTXT`: Invalid TXT record
+- `BA_BADQUERY`: Invalid DNS query
+- `BA_BADRESPONSE`: Invalid DNS response
+- `BA_NETWORK`: Network error
+- `BA_NOTREADY`: Network not ready
+- `BA_BUSY`: Operation in progress
+- `BA_CANCELLED`: Operation cancelled
 
 ## Best Practices
 
@@ -188,7 +200,7 @@ Here's a complete example of a service registration and discovery:
 #include <proto/bonami.h>
 #include <stdio.h>
 
-void serviceCallback(const struct BonamiService *service, void *userData)
+void serviceCallback(const struct BAService *service, void *userData)
 {
     printf("Found service: %s\n", service->name);
     printf("Type: %s\n", service->type);
@@ -204,29 +216,31 @@ int main(void)
     }
     
     /* Register a service */
-    struct BonamiService service;
-    service.name = "My Web Server";
-    service.type = "_http._tcp.local";
+    struct BAService service;
+    memset(&service, 0, sizeof(service));
+    strncpy(service.name, "My Web Server", BA_MAX_NAME_LEN - 1);
+    strncpy(service.type, "_http._tcp.local", BA_MAX_SERVICE_LEN - 1);
     service.port = 80;
     service.txt = NULL;
     
-    LONG result = BonamiRegisterService(&service);
-    if (result != BONAMI_OK) {
+    LONG result = BARegisterService(&service);
+    if (result != BA_OK) {
         printf("Failed to register service: %ld\n", result);
         CloseLibrary(BonamiBase);
         return 1;
     }
     
     /* Start discovery */
-    struct BonamiDiscovery discovery;
-    discovery.type = "_http._tcp.local";
+    struct BADiscovery discovery;
+    memset(&discovery, 0, sizeof(discovery));
+    strncpy(discovery.type, "_http._tcp.local", BA_MAX_SERVICE_LEN - 1);
     discovery.callback = serviceCallback;
     discovery.userData = NULL;
     
-    result = BonamiStartDiscovery(&discovery);
-    if (result != BONAMI_OK) {
+    result = BAStartDiscovery(&discovery);
+    if (result != BA_OK) {
         printf("Failed to start discovery: %ld\n", result);
-        BonamiUnregisterService(service.name, service.type);
+        BAUnregisterService(service.name, service.type);
         CloseLibrary(BonamiBase);
         return 1;
     }
@@ -236,8 +250,8 @@ int main(void)
     Delay(5000);  /* Wait 5 seconds */
     
     /* Cleanup */
-    BonamiStopDiscovery(discovery.type);
-    BonamiUnregisterService(service.name, service.type);
+    BAStopDiscovery(&discovery);
+    BAUnregisterService(service.name, service.type);
     CloseLibrary(BonamiBase);
     
     return 0;
@@ -304,8 +318,8 @@ The daemon implements DNS record caching:
 
 Enable debug logging by setting the log level in the configuration file:
 ```
-ENV:Bonami/config
-2  # LOG_DEBUG level
+SYS:Utilities/BonAmi/config
+3  # LOG_DEBUG level
 ```
 
 ## Contributing
