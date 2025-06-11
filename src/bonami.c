@@ -1,5 +1,6 @@
 #include <exec/types.h>
 #include <exec/memory.h>
+#include <exec/libraries.h>
 #include <exec/ports.h>
 #include <exec/semaphores.h>
 #include <dos/dos.h>
@@ -12,8 +13,8 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#include "bonami.h"
-#include "dns.h"
+#include "/include/bonami.h"
+#include "/include/dns.h"
 
 /* Version string */
 static const char version[] = "$VER: bonamid 40.0 (01.01.2024)";
@@ -45,22 +46,71 @@ static const char version[] = "$VER: bonamid 40.0 (01.01.2024)";
 #define LOG_INFO  2
 #define LOG_DEBUG 3
 
-/* Message types */
-#define MSG_REGISTER    1
-#define MSG_UNREGISTER  2
-#define MSG_DISCOVER    3
-#define MSG_STOP        4
-#define MSG_RESOLVE     5
-#define MSG_UPDATE      6
-#define MSG_SHUTDOWN    7
-#define MSG_MONITOR     8
-#define MSG_CONFIG      9
-#define MSG_ENUMERATE   10
+/* Message types for daemon communication */
+#define MSG_REGISTER   1
+#define MSG_UNREGISTER 2
+#define MSG_DISCOVER   3
+#define MSG_STOP       4
+#define MSG_UPDATE     5
+#define MSG_RESOLVE    6
+#define MSG_MONITOR    7
+#define MSG_CONFIG     8
+#define MSG_ENUMERATE  9
 
 /* Memory pool sizes */
-#define POOL_PUDDLE_SIZE   8192
+#define POOL_PUDDLE_SIZE   4096
 #define POOL_THRESHOLD     256
-#define POOL_MAX_PUDDLES   32
+#define POOL_MAX_PUDDLES   16
+
+/* Message structure for daemon communication */
+struct BAMessage {
+    struct Message msg;
+    ULONG type;
+    union {
+        struct {
+            struct BAService *service;
+            LONG result;
+        } register_msg;
+        struct {
+            char name[BA_MAX_NAME_LEN];
+            char type[BA_MAX_SERVICE_LEN];
+            LONG result;
+        } unregister_msg;
+        struct {
+            char type[BA_MAX_SERVICE_LEN];
+            struct List *services;
+            LONG result;
+        } discover_msg;
+        struct {
+            char name[BA_MAX_NAME_LEN];
+            char type[BA_MAX_SERVICE_LEN];
+            struct BAService *service;
+            LONG result;
+        } resolve_msg;
+        struct {
+            char name[BA_MAX_NAME_LEN];
+            char type[BA_MAX_SERVICE_LEN];
+            struct BAMonitor *monitor;
+            LONG interval;
+            BOOL notify;
+            LONG result;
+        } monitor_msg;
+        struct {
+            struct BAConfig *config;
+            LONG result;
+        } config_msg;
+        struct {
+            char name[BA_MAX_NAME_LEN];
+            char type[BA_MAX_SERVICE_LEN];
+            struct BATXTRecord *txt;
+            LONG result;
+        } update_msg;
+        struct {
+            struct List *types;
+            LONG result;
+        } enumerate_msg;
+    } data;
+};
 
 /* Interface state */
 struct InterfaceState {
@@ -68,11 +118,11 @@ struct InterfaceState {
     BOOL active;
     BOOL linkLocal;
     LONG lastCheck;
-    struct List *services;  /* Services on this interface */
-    struct List *probes;    /* Services being probed */
-    struct List *announces; /* Services being announced */
-    struct List *records;   /* DNS records on this interface */
-    struct List *questions;  /* DNS questions on this interface */
+    struct List services;  /* Services on this interface */
+    struct List probes;    /* Services being probed */
+    struct List announces; /* Services being announced */
+    struct List records;   /* DNS records on this interface */
+    struct List questions;  /* DNS questions on this interface */
 };
 
 /* Cache entry */
@@ -106,14 +156,29 @@ struct BADiscoveryNode {
     BOOL running;
 };
 
+/* Monitor node */
+struct BAMonitorNode {
+    struct Node node;
+    struct BAMonitor monitor;
+    struct Task *task;
+    BOOL running;
+};
+
+/* Update callback node */
+struct BAUpdateCallbackNode {
+    struct Node node;
+    struct BAUpdateCallback callback;
+};
+
 /* Command line template */
 static const char *template = "LOG/S,LOGFILE/F,DEBUG/S";
 
-/* Daemon state */
+/* Global daemon state */
 static struct {
     struct List services;
     struct List discoveries;
     struct List monitors;
+    struct List updateCallbacks;
     struct List cache;
     struct InterfaceState interfaces[MAX_INTERFACES];
     LONG num_interfaces;
@@ -125,6 +190,8 @@ static struct {
     APTR memPool;     /* Memory pool for allocations */
     struct Task *mainTask;
     struct MsgPort *port;
+    struct SignalSemaphore lock;  /* For state access */
+    struct SignalSemaphore msgLock;  /* For message handling */
     #ifdef __amigaos4__
     struct RoadshowIFace *IRoadshow;
     struct UtilityIFace *IUtility;
@@ -177,6 +244,8 @@ static struct DNSQuery *getNextQuery(struct InterfaceState *iface);
 static void requeueQuery(struct InterfaceState *iface, struct DNSQuery *query);
 static LONG sendQuery(struct InterfaceState *iface, struct DNSQuery *query);
 static void cleanupList(struct List *list);
+static APTR AllocPooled(ULONG size);
+static void FreePooled(APTR memory, ULONG size);
 
 /* Main function */
 int main(int argc, char **argv) {
@@ -252,6 +321,7 @@ static LONG initDaemon(void)
     NewList(&bonami.services);
     NewList(&bonami.discoveries);
     NewList(&bonami.monitors);
+    NewList(&bonami.updateCallbacks);
     NewList(&bonami.cache);
     
     /* Initialize state */
@@ -509,6 +579,7 @@ static void cleanupDaemon(void)
     while (RemHead(&bonami.services));
     while (RemHead(&bonami.discoveries));
     while (RemHead(&bonami.monitors));
+    while (RemHead(&bonami.updateCallbacks));
     
     /* Delete message port */
     if (bonami.port) {
@@ -583,53 +654,38 @@ static void processMessage(struct BAMessage *msg)
 {
     struct BAServiceNode *service;
     struct BADiscoveryNode *discovery;
+    struct BAMonitorNode *monitor;
+    struct BAUpdateCallbackNode *callback;
     LONG result;
     
     switch (msg->type) {
         case MSG_REGISTER:
-            /* Validate service name */
-            result = validateServiceName(msg->data.register_msg.service.name);
+            /* Validate service */
+            result = validateServiceName(msg->data.register_msg.service->name);
             if (result != BA_OK) {
                 msg->data.register_msg.result = result;
                 ReplyMsg((struct Message *)msg);
                 return;
             }
             
-            /* Validate service type */
-            result = validateServiceType(msg->data.register_msg.service.type);
+            result = validateServiceType(msg->data.register_msg.service->type);
             if (result != BA_OK) {
                 msg->data.register_msg.result = result;
                 ReplyMsg((struct Message *)msg);
                 return;
             }
             
-            /* Validate port */
-            result = validatePort(msg->data.register_msg.service.port);
+            /* Check for conflicts */
+            result = checkServiceConflict(msg->data.register_msg.service->name,
+                                        msg->data.register_msg.service->type);
             if (result != BA_OK) {
                 msg->data.register_msg.result = result;
-                ReplyMsg((struct Message *)msg);
-                return;
-            }
-            
-            /* Validate TXT records */
-            result = validateTXTRecord(msg->data.register_msg.service.txt);
-            if (result != BA_OK) {
-                msg->data.register_msg.result = result;
-                ReplyMsg((struct Message *)msg);
-                return;
-            }
-            
-            /* Check for duplicate service */
-            service = findService(msg->data.register_msg.service.name,
-                                msg->data.register_msg.service.type);
-            if (service) {
-                msg->data.register_msg.result = BA_DUPLICATE;
                 ReplyMsg((struct Message *)msg);
                 return;
             }
             
             /* Create service node */
-            service = AllocMem(sizeof(struct BAServiceNode), MEMF_CLEAR);
+            service = AllocPooled(sizeof(struct BAServiceNode));
             if (!service) {
                 msg->data.register_msg.result = BA_NOMEM;
                 ReplyMsg((struct Message *)msg);
@@ -637,11 +693,8 @@ static void processMessage(struct BAMessage *msg)
             }
             
             /* Initialize service */
-            memcpy(&service->service, &msg->data.register_msg.service,
+            memcpy(&service->service, msg->data.register_msg.service,
                    sizeof(struct BAService));
-            service->state = 0;  /* Start probing */
-            service->probeCount = 0;
-            service->announceCount = 0;
             
             /* Add to service list */
             AddTail(&bonami.services, (struct Node *)service);
@@ -667,7 +720,7 @@ static void processMessage(struct BAMessage *msg)
             
             /* Remove from list */
             Remove((struct Node *)service);
-            FreeMem(service, sizeof(struct BAServiceNode));
+            FreePooled(service, sizeof(struct BAServiceNode));
             
             msg->data.unregister_msg.result = BA_OK;
             break;
@@ -682,7 +735,7 @@ static void processMessage(struct BAMessage *msg)
             }
             
             /* Create discovery node */
-            discovery = AllocMem(sizeof(struct BADiscoveryNode), MEMF_CLEAR);
+            discovery = AllocPooled(sizeof(struct BADiscoveryNode));
             if (!discovery) {
                 msg->data.discover_msg.result = BA_NOMEM;
                 ReplyMsg((struct Message *)msg);
@@ -696,7 +749,20 @@ static void processMessage(struct BAMessage *msg)
             discovery->running = TRUE;
             
             /* Add to discovery list */
-            AddTail(&bonami.services, (struct Node *)discovery);
+            AddTail(&bonami.discoveries, (struct Node *)discovery);
+            
+            /* Start discovery task */
+            discovery->task = CreateTask("BonAmi Discovery",
+                                       -1,
+                                       discoveryTask,
+                                       8192);
+            if (!discovery->task) {
+                Remove((struct Node *)discovery);
+                FreePooled(discovery, sizeof(struct BADiscoveryNode));
+                msg->data.discover_msg.result = BA_NOMEM;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
             
             msg->data.discover_msg.result = BA_OK;
             break;
@@ -713,15 +779,25 @@ static void processMessage(struct BAMessage *msg)
             /* Stop discovery */
             discovery->running = FALSE;
             
+            /* Wait for task to finish */
+            Delay(50);  /* Wait 1 second */
+            
             /* Remove from list */
             Remove((struct Node *)discovery);
-            FreeMem(discovery, sizeof(struct BADiscoveryNode));
+            FreePooled(discovery, sizeof(struct BADiscoveryNode));
             
             msg->data.discover_msg.result = BA_OK;
             break;
             
         case MSG_MONITOR:
-            /* Validate service type */
+            /* Validate service */
+            result = validateServiceName(msg->data.monitor_msg.name);
+            if (result != BA_OK) {
+                msg->data.monitor_msg.result = result;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
             result = validateServiceType(msg->data.monitor_msg.type);
             if (result != BA_OK) {
                 msg->data.monitor_msg.result = result;
@@ -729,22 +805,90 @@ static void processMessage(struct BAMessage *msg)
                 return;
             }
             
-            /* Add monitor */
-            AddTail(&bonami.monitors, (struct Node *)msg->data.monitor_msg.monitor);
+            /* Create monitor node */
+            monitor = AllocPooled(sizeof(struct BAMonitorNode));
+            if (!monitor) {
+                msg->data.monitor_msg.result = BA_NOMEM;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Initialize monitor */
+            strncpy(monitor->monitor.name, msg->data.monitor_msg.name,
+                    sizeof(monitor->monitor.name) - 1);
+            strncpy(monitor->monitor.type, msg->data.monitor_msg.type,
+                    sizeof(monitor->monitor.type) - 1);
+            monitor->monitor.checkInterval = msg->data.monitor_msg.interval;
+            monitor->monitor.notifyOffline = msg->data.monitor_msg.notify;
+            monitor->running = TRUE;
+            
+            /* Add to monitor list */
+            AddTail(&bonami.monitors, (struct Node *)monitor);
+            
+            /* Start monitor task */
+            monitor->task = CreateTask("BonAmi Monitor",
+                                     -1,
+                                     monitorTask,
+                                     8192);
+            if (!monitor->task) {
+                Remove((struct Node *)monitor);
+                FreePooled(monitor, sizeof(struct BAMonitorNode));
+                msg->data.monitor_msg.result = BA_NOMEM;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
             
             msg->data.monitor_msg.result = BA_OK;
             break;
             
         case MSG_CONFIG:
             /* Update configuration */
-            memcpy(&bonami.config, &msg->data.config_msg.config,
+            memcpy(&bonami.config, msg->data.config_msg.config,
                    sizeof(struct BAConfig));
             
             msg->data.config_msg.result = BA_OK;
             break;
             
-        case MSG_SHUTDOWN:
-            bonami.running = FALSE;
+        case MSG_UPDATE:
+            /* Find service */
+            service = findService(msg->data.update_msg.name,
+                                msg->data.update_msg.type);
+            if (!service) {
+                msg->data.update_msg.result = BA_NOTFOUND;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Update service records */
+            updateServiceRecords(service);
+            
+            msg->data.update_msg.result = BA_OK;
+            break;
+            
+        case MSG_ENUMERATE:
+            /* Initialize types list */
+            NewList(msg->data.enumerate_msg.types);
+            
+            /* Add service types */
+            for (service = (struct BAServiceNode *)bonami.services.lh_Head;
+                 service->node.ln_Succ;
+                 service = (struct BAServiceNode *)service->node.ln_Succ) {
+                struct Node *node = AllocPooled(sizeof(struct Node));
+                if (!node) {
+                    msg->data.enumerate_msg.result = BA_NOMEM;
+                    ReplyMsg((struct Message *)msg);
+                    return;
+                }
+                
+                node->ln_Name = (char *)service->service.type;
+                AddTail(msg->data.enumerate_msg.types, node);
+            }
+            
+            msg->data.enumerate_msg.result = BA_OK;
+            break;
+            
+        default:
+            msg->data.register_msg.result = BA_BADPARAM;
             break;
     }
     
@@ -1606,7 +1750,7 @@ static void updateInterfaceServices(struct InterfaceState *iface)
 
 /* Add cache entry */
 static void addCacheEntry(const char *name, WORD type, WORD class,
-                         const void *data, LONG length)
+                         const struct DNSRecord *record, LONG ttl)
 {
     struct CacheEntry *entry;
     
@@ -1625,16 +1769,16 @@ static void addCacheEntry(const char *name, WORD type, WORD class,
     
     entry->type = type;
     entry->class = class;
-    entry->data = AllocMem(length, MEMF_CLEAR);
+    entry->data = AllocMem(sizeof(struct DNSRecord), MEMF_CLEAR);
     if (!entry->data) {
         FreeMem(entry->name, strlen(name) + 1);
         FreeMem(entry, sizeof(struct CacheEntry));
         return;
     }
     
-    memcpy(entry->data, data, length);
-    entry->length = length;
-    entry->expires = GetSysTime() + 120;  /* 2 minutes */
+    memcpy(entry->data, record, sizeof(struct DNSRecord));
+    entry->ttl = ttl;
+    entry->expires = GetSysTime() + ttl;
     
     /* Add to cache */
     AddTail(&bonami.cache, (struct Node *)entry);
@@ -1659,7 +1803,7 @@ static void removeCacheEntry(const char *name, WORD type, WORD class)
             
             /* Free memory */
             FreeMem(entry->name, strlen(entry->name) + 1);
-            FreeMem(entry->data, entry->length);
+            FreeMem(entry->data, sizeof(struct DNSRecord));
             FreeMem(entry, sizeof(struct CacheEntry));
         }
     }
@@ -1699,7 +1843,7 @@ static void cleanupCache(void)
         
         /* Free memory */
         FreeMem(entry->name, strlen(entry->name) + 1);
-        FreeMem(entry->data, entry->length);
+        FreeMem(entry->data, sizeof(struct DNSRecord));
         FreeMem(entry, sizeof(struct CacheEntry));
     }
 }
