@@ -46,13 +46,15 @@ static const char version[] = "$VER: bonamid 1.0 (01.01.2024)";
 #define LOG_DEBUG 3
 
 /* Message types */
-#define BONAMI_MSG_REGISTER    1
-#define BONAMI_MSG_UNREGISTER  2
-#define BONAMI_MSG_DISCOVER    3
-#define BONAMI_MSG_RESOLVE     4
-#define BONAMI_MSG_QUERY       5
-#define BONAMI_MSG_UPDATE      6
-#define BONAMI_MSG_SHUTDOWN    7
+#define MSG_REGISTER    1
+#define MSG_UNREGISTER  2
+#define MSG_DISCOVER    3
+#define MSG_RESOLVE     4
+#define MSG_QUERY       5
+#define MSG_UPDATE      6
+#define MSG_SHUTDOWN    7
+#define MSG_MONITOR     8
+#define MSG_CONFIG      9
 
 /* Interface state */
 struct InterfaceState {
@@ -68,7 +70,7 @@ struct InterfaceState {
 /* Cache entry */
 struct CacheEntry {
     struct Node node;
-    char name[256];
+    char name[BA_MAX_NAME_LEN];
     WORD type;
     WORD class;
     struct DNSRecord record;
@@ -77,9 +79,9 @@ struct CacheEntry {
 };
 
 /* Service node */
-struct BonamiServiceNode {
+struct BAServiceNode {
     struct Node node;
-    struct BonamiService service;
+    struct BAService service;
     struct InterfaceState *iface;
     LONG state;  /* 0=probing, 1=announcing, 2=active */
     LONG probeCount;
@@ -89,9 +91,9 @@ struct BonamiServiceNode {
 };
 
 /* Discovery node */
-struct BonamiDiscoveryNode {
+struct BADiscoveryNode {
     struct Node node;
-    struct BonamiDiscovery discovery;
+    struct BADiscovery discovery;
     struct Task *task;
     BOOL running;
 };
@@ -104,6 +106,7 @@ struct {
     struct List *services;
     struct List *cache;
     struct List *monitors;
+    struct List *updateCallbacks;
     struct SignalSemaphore *lock;
     struct MsgPort *port;
     struct Task *mainTask;
@@ -121,7 +124,7 @@ struct {
     struct Process *discoveryProc;
     struct InterfaceState interfaces[MAX_INTERFACES];
     LONG logLevel;
-    char hostname[256];
+    char hostname[BA_MAX_NAME_LEN];
     LONG cacheTimeout;
     LONG mdnsTTL;
     ULONG signals;  /* Signal mask for main task */
@@ -132,13 +135,13 @@ static LONG initDaemon(void);
 static void cleanupDaemon(void);
 static void networkMonitorTask(void);
 static void discoveryTask(void);
-static void processMessage(struct BonamiMessage *msg);
+static void processMessage(struct BAMessage *msg);
 static LONG createMulticastSocket(void);
 static LONG checkNetworkStatus(void);
-static struct BonamiServiceNode *findService(const char *name, const char *type);
-static struct BonamiDiscoveryNode *findDiscovery(const char *type);
-static void updateServiceRecords(struct BonamiServiceNode *service);
-static void removeServiceRecords(struct BonamiServiceNode *service);
+static struct BAServiceNode *findService(const char *name, const char *type);
+static struct BADiscoveryNode *findDiscovery(const char *type);
+static void updateServiceRecords(struct BAServiceNode *service);
+static void removeServiceRecords(struct BAServiceNode *service);
 static LONG processDNSQuery(struct DNSQuery *query);
 static LONG validateServiceName(const char *name);
 static LONG validateServiceType(const char *type);
@@ -155,10 +158,11 @@ static struct CacheEntry *findCacheEntry(const char *name, WORD type, WORD class
 static void cleanupCache(void);
 static LONG resolveHostname(void);
 static LONG checkServiceConflict(const char *name, const char *type);
-static void startServiceProbing(struct InterfaceState *iface, struct BonamiService *service);
-static void startServiceAnnouncement(struct InterfaceState *iface, struct BonamiService *service);
+static void startServiceProbing(struct InterfaceState *iface, struct BAService *service);
+static void startServiceAnnouncement(struct InterfaceState *iface, struct BAService *service);
 static void processServiceStates(struct InterfaceState *iface);
 static void handleSignals(void);
+static void processUpdateCallbacks(struct BAService *service);
 
 /* Main function */
 int main(int argc, char **argv) {
@@ -181,7 +185,7 @@ int main(int argc, char **argv) {
         if (msg) {
             msg = GetMsg(bonami.port);
             if (msg) {
-                processMessage((struct BonamiMessage *)msg);
+                processMessage((struct BAMessage *)msg);
             }
         }
     }
@@ -425,8 +429,8 @@ static LONG saveConfig(void)
 /* Cleanup daemon */
 static void cleanupDaemon(void)
 {
-    struct BonamiServiceNode *service;
-    struct BonamiDiscoveryNode *discovery;
+    struct BAServiceNode *service;
+    struct BADiscoveryNode *discovery;
     struct CacheEntry *entry;
     
     /* Stop tasks */
@@ -439,8 +443,8 @@ static void cleanupDaemon(void)
     
     /* Clean up services */
     if (bonami.services) {
-        while ((service = (struct BonamiServiceNode *)RemHead(bonami.services))) {
-            FreeMem(service, sizeof(struct BonamiServiceNode));
+        while ((service = (struct BAServiceNode *)RemHead(bonami.services))) {
+            FreeMem(service, sizeof(struct BAServiceNode));
         }
         FreeMem(bonami.services, sizeof(struct List));
     }
@@ -498,7 +502,7 @@ int main(void)
         if (msg) {
             msg = GetMsg(bonami.port);
             if (msg) {
-                processMessage((struct BonamiMessage *)msg);
+                processMessage((struct BAMessage *)msg);
             }
         }
     }
