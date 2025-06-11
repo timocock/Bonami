@@ -45,8 +45,9 @@ struct BonamiService {
 /* Structure for service discovery */
 struct BonamiDiscovery {
     char type[BONAMI_MAX_SERVICE_LEN];
-    struct List *services;
+    struct List *services; /* List of BonamiServiceInfo */
     struct SignalSemaphore *lock;
+    void (*callback)(struct BonamiServiceInfo *info, int event); /* Async callback */
 };
 
 /* Structure for discovered service */
@@ -60,22 +61,49 @@ struct BonamiServiceInfo {
     ULONG ttl;
 };
 
-/* Library base structure */
+/* Event types for callbacks */
+#define BONAMI_EVENT_ADDED    1
+#define BONAMI_EVENT_REMOVED  2
+#define BONAMI_EVENT_UPDATED  3
+
+/* Library base structure (internal use) */
 struct BonamiBase {
     struct Library lib;
     struct SignalSemaphore lock;
     struct MsgPort *replyPort;
     struct Task *mainTask;
     ULONG flags;
-    /* Add more fields as needed */
 };
 
-/* Function prototypes */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Public API */
 LONG BonamiRegisterService(struct BonamiService *service);
 LONG BonamiUnregisterService(const char *name, const char *type);
 LONG BonamiStartDiscovery(struct BonamiDiscovery *discovery);
 LONG BonamiStopDiscovery(struct BonamiDiscovery *discovery);
 LONG BonamiGetServiceInfo(struct BonamiServiceInfo *info, const char *name, const char *type);
 LONG BonamiEnumerateServices(struct List *services, const char *type);
+
+/* New: Enumerate all service types currently advertised */
+LONG BonamiEnumerateServiceTypes(struct List *types);
+
+/* New: Query arbitrary DNS record (advanced) */
+LONG BonamiQueryRecord(const char *name, UWORD type, UWORD class, void *result, LONG resultlen);
+
+/* New: Set async callback for discovery events */
+LONG BonamiSetDiscoveryCallback(struct BonamiDiscovery *discovery, void (*callback)(struct BonamiServiceInfo *info, int event));
+
+/* New: Update TXT record for a registered service */
+LONG BonamiUpdateServiceTXT(const char *name, const char *type, const char *txt);
+
+/* New: Update/rename a registered service */
+LONG BonamiUpdateService(struct BonamiService *service);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BONAMI_H */ 
