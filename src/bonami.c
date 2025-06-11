@@ -16,7 +16,7 @@
 #include "dns.h"
 
 /* Version string */
-static const char version[] = "$VER: bonamid 1.0 (01.01.2024)";
+static const char version[] = "$VER: bonamid 40.0 (01.01.2024)";
 
 /* Constants */
 #define MDNS_PORT 5353
@@ -125,6 +125,10 @@ static struct {
     APTR memPool;     /* Memory pool for allocations */
     struct Task *mainTask;
     struct MsgPort *port;
+    #ifdef __amigaos4__
+    struct RoadshowIFace *IRoadshow;
+    struct UtilityIFace *IUtility;
+    #endif
 } bonami;
 
 /* Function prototypes */
@@ -281,9 +285,69 @@ static LONG initDaemon(void)
         }
     }
     
+    #ifdef __amigaos4__
+    /* Get Roadshow interface */
+    struct Library *roadshowBase = OpenLibrary("roadshow.library", 40);
+    if (!roadshowBase) {
+        if (bonami.log_file) {
+            Close(bonami.log_file);
+        }
+        DeleteMsgPort(bonami.port);
+        DeletePool(bonami.memPool);
+        FreeArgs(args);
+        return BA_ERROR;
+    }
+    
+    bonami.IRoadshow = (struct RoadshowIFace *)GetInterface(roadshowBase, "main", 1, NULL);
+    if (!bonami.IRoadshow) {
+        CloseLibrary(roadshowBase);
+        if (bonami.log_file) {
+            Close(bonami.log_file);
+        }
+        DeleteMsgPort(bonami.port);
+        DeletePool(bonami.memPool);
+        FreeArgs(args);
+        return BA_ERROR;
+    }
+    
+    /* Get Utility interface */
+    struct Library *utilityBase = OpenLibrary("utility.library", 40);
+    if (!utilityBase) {
+        DropInterface((struct Interface *)bonami.IRoadshow);
+        CloseLibrary(roadshowBase);
+        if (bonami.log_file) {
+            Close(bonami.log_file);
+        }
+        DeleteMsgPort(bonami.port);
+        DeletePool(bonami.memPool);
+        FreeArgs(args);
+        return BA_ERROR;
+    }
+    
+    bonami.IUtility = (struct UtilityIFace *)GetInterface(utilityBase, "main", 1, NULL);
+    if (!bonami.IUtility) {
+        CloseLibrary(utilityBase);
+        DropInterface((struct Interface *)bonami.IRoadshow);
+        CloseLibrary(roadshowBase);
+        if (bonami.log_file) {
+            Close(bonami.log_file);
+        }
+        DeleteMsgPort(bonami.port);
+        DeletePool(bonami.memPool);
+        FreeArgs(args);
+        return BA_ERROR;
+    }
+    #endif
+    
     /* Initialize network */
     result = initInterfaces();
     if (result != BA_OK) {
+        #ifdef __amigaos4__
+        DropInterface((struct Interface *)bonami.IUtility);
+        CloseLibrary(utilityBase);
+        DropInterface((struct Interface *)bonami.IRoadshow);
+        CloseLibrary(roadshowBase);
+        #endif
         if (bonami.log_file) {
             Close(bonami.log_file);
         }
@@ -296,6 +360,12 @@ static LONG initDaemon(void)
     /* Resolve hostname */
     result = resolveHostname();
     if (result != BA_OK) {
+        #ifdef __amigaos4__
+        DropInterface((struct Interface *)bonami.IUtility);
+        CloseLibrary(utilityBase);
+        DropInterface((struct Interface *)bonami.IRoadshow);
+        CloseLibrary(roadshowBase);
+        #endif
         if (bonami.log_file) {
             Close(bonami.log_file);
         }
@@ -406,6 +476,23 @@ static LONG saveConfig(void)
 /* Cleanup daemon */
 static void cleanupDaemon(void)
 {
+    #ifdef __amigaos4__
+    /* Drop interfaces */
+    if (bonami.IUtility) {
+        struct Library *utilityBase = bonami.IUtility->Data.LibBase;
+        DropInterface((struct Interface *)bonami.IUtility);
+        CloseLibrary(utilityBase);
+        bonami.IUtility = NULL;
+    }
+    
+    if (bonami.IRoadshow) {
+        struct Library *roadshowBase = bonami.IRoadshow->Data.LibBase;
+        DropInterface((struct Interface *)bonami.IRoadshow);
+        CloseLibrary(roadshowBase);
+        bonami.IRoadshow = NULL;
+    }
+    #endif
+    
     /* Close log file */
     if (bonami.log_file) {
         Close(bonami.log_file);
@@ -1099,16 +1186,28 @@ static LONG createMulticastSocket(void)
     LONG sock;
     
     /* Create socket */
+    #ifdef __amigaos4__
+    sock = bonami.IRoadshow->socket(AF_INET, SOCK_DGRAM, 0);
+    #else
     sock = socket(AF_INET, SOCK_DGRAM, 0);
+    #endif
     if (sock < 0) {
         logMessage(LOG_ERROR, "Failed to create socket: %s", strerror(errno));
         return BA_NETWORK;
     }
     
     /* Set socket options */
+    #ifdef __amigaos4__
+    if (bonami.IRoadshow->setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0) {
+    #else
     if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0) {
+    #endif
         logMessage(LOG_ERROR, "Failed to set SO_REUSEADDR: %s", strerror(errno));
+        #ifdef __amigaos4__
+        bonami.IRoadshow->close(sock);
+        #else
         close(sock);
+        #endif
         return BA_NETWORK;
     }
     
@@ -1118,9 +1217,17 @@ static LONG createMulticastSocket(void)
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(MDNS_PORT);
     
+    #ifdef __amigaos4__
+    if (bonami.IRoadshow->bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    #else
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    #endif
         logMessage(LOG_ERROR, "Failed to bind socket: %s", strerror(errno));
+        #ifdef __amigaos4__
+        bonami.IRoadshow->close(sock);
+        #else
         close(sock);
+        #endif
         return BA_NETWORK;
     }
     
@@ -1128,9 +1235,17 @@ static LONG createMulticastSocket(void)
     mreq.imr_multiaddr.s_addr = inet_addr(MDNS_MULTICAST_ADDR);
     mreq.imr_interface.s_addr = htonl(INADDR_ANY);
     
+    #ifdef __amigaos4__
+    if (bonami.IRoadshow->setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+    #else
     if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+    #endif
         logMessage(LOG_ERROR, "Failed to join multicast group: %s", strerror(errno));
+        #ifdef __amigaos4__
+        bonami.IRoadshow->close(sock);
+        #else
         close(sock);
+        #endif
         return BA_NETWORK;
     }
     
@@ -1431,7 +1546,11 @@ static void cleanupInterfaces(void)
         
         /* Close socket */
         if (iface->socket >= 0) {
+            #ifdef __amigaos4__
+            bonami.IRoadshow->close(iface->socket);
+            #else
             close(iface->socket);
+            #endif
         }
         
         /* Free lists */
@@ -1456,7 +1575,11 @@ static LONG checkInterface(struct InterfaceState *iface)
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, iface->name, sizeof(ifr.ifr_name) - 1);
     
+    #ifdef __amigaos4__
+    if (bonami.IRoadshow->ioctl(iface->socket, SIOCGIFFLAGS, &ifr) < 0) {
+    #else
     if (ioctl(iface->socket, SIOCGIFFLAGS, &ifr) < 0) {
+    #endif
         return BA_ERROR;
     }
     
@@ -1587,7 +1710,11 @@ static LONG resolveHostname(void)
     struct hostent *host;
     
     /* Get hostname */
+    #ifdef __amigaos4__
+    host = bonami.IRoadshow->gethostbyname(bonami.config.hostname);
+    #else
     host = gethostbyname(bonami.config.hostname);
+    #endif
     if (!host) {
         return BA_ERROR;
     }
@@ -1767,8 +1894,13 @@ static LONG sendQuery(struct InterfaceState *iface, struct DNSQuery *query)
     addr.sin_port = htons(MDNS_PORT);
     
     /* Send message */
+    #ifdef __amigaos4__
+    result = bonami.IRoadshow->sendto(iface->socket, &msg, sizeof(msg), 0,
+                                     (struct sockaddr *)&addr, sizeof(addr));
+    #else
     result = sendto(iface->socket, &msg, sizeof(msg), 0,
                    (struct sockaddr *)&addr, sizeof(addr));
+    #endif
     if (result < 0) {
         logMessage(LOG_ERROR, "Failed to send query: %s", strerror(errno));
         return BA_NETWORK;
