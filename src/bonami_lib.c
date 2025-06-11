@@ -10,6 +10,7 @@
 #include <proto/roadshow.h>
 #include <string.h>
 #include <stdio.h>
+#include <netinet/in.h>
 
 #include "/include/bonami.h"
 #include "/include/dns.h"
@@ -103,6 +104,32 @@ static void monitorTask(void *arg);
 static BOOL matchFilter(struct BAService *service, struct BAFilter *filter);
 static LONG validateServiceType(const char *type);
 static LONG validateServiceName(const char *name);
+
+/* Version string */
+static const char version[] = "$VER: bonami.library 40.0 (01.01.2024)";
+
+/* Library tags */
+#define LIBTAG_VERSION     (TAG_USER + 1)
+#define LIBTAG_DEBUG       (TAG_USER + 2)
+#define LIBTAG_MEMTRACK    (TAG_USER + 3)
+
+/* Library base structure */
+struct BonAmiBase {
+    struct Library lib;
+    struct SignalSemaphore sem;
+    struct MsgPort *replyPort;
+    struct MsgPort *bonamiPort;
+    BOOL debug;
+    BOOL memTrack;
+    #ifdef __amigaos4__
+    struct BonAmiIFace *IBonAmi;
+    #endif
+};
+
+/* Forward declarations */
+static LONG checkBonAmi(void);
+static void trackMemory(APTR memory, ULONG size, const char *file, LONG line);
+static void untrackMemory(APTR memory, const char *file, LONG line);
 
 /**
  * OpenLibrary - Initialize and open the BonAmi library
@@ -1108,4 +1135,179 @@ LONG BAEnumerateServiceTypes(struct List *types)
     }
     
     return BA_OK;
+}
+
+/* Open library */
+struct Library *BAOpenLibrary(ULONG version, struct TagItem *tags)
+{
+    struct BonAmiBase *base;
+    struct TagItem *tag;
+    ULONG libVersion = 40;
+    BOOL debug = FALSE;
+    BOOL memTrack = FALSE;
+    
+    /* Check version */
+    if (version > 40) {
+        SetIoErr(ERROR_REQUIRED_ARG_MISSING);
+        return NULL;
+    }
+    
+    /* Process tags */
+    if (tags) {
+        while ((tag = NextTagItem(&tags))) {
+            switch (tag->ti_Tag) {
+                case LIBTAG_VERSION:
+                    libVersion = tag->ti_Data;
+                    break;
+                case LIBTAG_DEBUG:
+                    debug = tag->ti_Data;
+                    break;
+                case LIBTAG_MEMTRACK:
+                    memTrack = tag->ti_Data;
+                    break;
+            }
+        }
+    }
+    
+    /* Open library */
+    base = (struct BonAmiBase *)OpenLibrary("bonami.library", libVersion);
+    if (!base) {
+        return NULL;
+    }
+    
+    /* Initialize base */
+    base->debug = debug;
+    base->memTrack = memTrack;
+    
+    /* Create reply port */
+    base->replyPort = CreateMsgPort();
+    if (!base->replyPort) {
+        CloseLibrary((struct Library *)base);
+        SetIoErr(ERROR_NO_FREE_STORE);
+        return NULL;
+    }
+    
+    /* Set port priority */
+    SetMsgPortPriority(base->replyPort, MPRI_NORMAL);
+    
+    /* Initialize semaphore */
+    InitSemaphore(&base->sem);
+    
+    /* Find BonAmi port */
+    base->bonamiPort = FindPort("BonAmi");
+    if (!base->bonamiPort) {
+        DeleteMsgPort(base->replyPort);
+        CloseLibrary((struct Library *)base);
+        SetIoErr(ERROR_OBJECT_NOT_FOUND);
+        return NULL;
+    }
+    
+    #ifdef __amigaos4__
+    /* Get interface */
+    base->IBonAmi = (struct BonAmiIFace *)GetInterface((struct Library *)base, "main", 1, NULL);
+    if (!base->IBonAmi) {
+        DeleteMsgPort(base->replyPort);
+        CloseLibrary((struct Library *)base);
+        SetIoErr(ERROR_OBJECT_NOT_FOUND);
+        return NULL;
+    }
+    #endif
+    
+    return (struct Library *)base;
+}
+
+/* Close library */
+void BACloseLibrary(struct Library *lib)
+{
+    struct BonAmiBase *base = (struct BonAmiBase *)lib;
+    
+    if (!base) {
+        return;
+    }
+    
+    #ifdef __amigaos4__
+    /* Drop interface */
+    if (base->IBonAmi) {
+        DropInterface((struct Interface *)base->IBonAmi);
+        base->IBonAmi = NULL;
+    }
+    #endif
+    
+    /* Delete reply port */
+    if (base->replyPort) {
+        DeleteMsgPort(base->replyPort);
+        base->replyPort = NULL;
+    }
+    
+    /* Close library */
+    CloseLibrary(lib);
+}
+
+/* Allocate memory with tracking */
+static APTR allocTracked(ULONG size, const char *file, LONG line)
+{
+    struct BonAmiBase *base = (struct BonAmiBase *)SysBase->LibNode;
+    APTR memory;
+    
+    memory = AllocVec(size, MEMF_CLEAR);
+    if (memory && base->memTrack) {
+        trackMemory(memory, size, file, line);
+    }
+    
+    return memory;
+}
+
+/* Free memory with tracking */
+static void freeTracked(APTR memory, const char *file, LONG line)
+{
+    struct BonAmiBase *base = (struct BonAmiBase *)SysBase->LibNode;
+    
+    if (memory && base->memTrack) {
+        untrackMemory(memory, file, line);
+    }
+    
+    FreeVec(memory);
+}
+
+/* Track memory allocation */
+static void trackMemory(APTR memory, ULONG size, const char *file, LONG line)
+{
+    struct BonAmiBase *base = (struct BonAmiBase *)SysBase->LibNode;
+    
+    if (base->debug) {
+        printf("Allocated %lu bytes at %p from %s:%ld\n", size, memory, file, line);
+    }
+}
+
+/* Untrack memory allocation */
+static void untrackMemory(APTR memory, const char *file, LONG line)
+{
+    struct BonAmiBase *base = (struct BonAmiBase *)SysBase->LibNode;
+    
+    if (base->debug) {
+        printf("Freed memory at %p from %s:%ld\n", memory, file, line);
+    }
+}
+
+/* Send message with timeout */
+static LONG sendMessageTimeout(struct BAMessage *msg, ULONG timeout)
+{
+    struct BonAmiBase *base = (struct BonAmiBase *)SysBase->LibNode;
+    ULONG signals;
+    LONG result;
+    
+    /* Send message */
+    msg->mn_ReplyPort = base->replyPort;
+    PutMsg(base->bonamiPort, (struct Message *)msg);
+    
+    /* Wait for reply */
+    signals = Wait(1 << base->replyPort->mp_SigBit | SIGBREAKF_CTRL_C);
+    if (signals & SIGBREAKF_CTRL_C) {
+        return BA_ABORTED;
+    }
+    
+    /* Get result */
+    result = msg->result;
+    
+    return result;
 } 

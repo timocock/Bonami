@@ -159,6 +159,28 @@ struct BAConfig {
     BOOL autoReconnect;
 };
 
+/* Library tags */
+#define LIBTAG_VERSION     (TAG_USER + 1)
+#define LIBTAG_DEBUG       (TAG_USER + 2)
+#define LIBTAG_MEMTRACK    (TAG_USER + 3)
+
+/* Library base structure */
+struct BonAmiBase {
+    struct Library lib;
+    struct SignalSemaphore sem;
+    struct MsgPort *replyPort;
+    struct MsgPort *bonamiPort;
+    BOOL debug;
+    BOOL memTrack;
+    #ifdef __amigaos4__
+    struct BonAmiIFace *IBonAmi;
+    #endif
+};
+
+/* Library functions */
+struct Library *BAOpenLibrary(ULONG version, struct TagItem *tags);
+void BACloseLibrary(struct Library *lib);
+
 #ifdef __cplusplus
 extern "C" {
 #endif
