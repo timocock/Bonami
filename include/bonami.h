@@ -47,6 +47,9 @@
 #define BA_SERVICE_SSH     "_ssh._tcp"
 #define BA_SERVICE_PRINT   "_printer._tcp"
 
+/* Callback type for service updates */
+typedef void (*BAServiceCallback)(struct BAService *service, APTR userData);
+
 /* Structure for service registration */
 struct BAService {
     char name[BA_MAX_NAME_LEN];
@@ -80,6 +83,15 @@ struct BAServiceInfo {
 #define BA_EVENT_ADDED    1
 #define BA_EVENT_REMOVED  2
 #define BA_EVENT_UPDATED  3
+
+/* Structure for update callbacks */
+struct BAUpdateCallback {
+    struct Node node;
+    char name[BA_MAX_NAME_LEN];
+    char type[BA_MAX_SERVICE_LEN];
+    BAServiceCallback callback;
+    APTR userData;
+};
 
 /* Library base structure (internal use) */
 struct BABase {

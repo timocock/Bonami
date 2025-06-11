@@ -65,6 +65,12 @@ struct BAMessage {
             struct BAConfig *config;
             LONG result;
         } config_msg;
+        struct {
+            char name[BA_MAX_NAME_LEN];
+            char type[BA_MAX_SERVICE_LEN];
+            struct BATXTRecord *txt;
+            LONG result;
+        } update_msg;
     } data;
 };
 
