@@ -15,9 +15,9 @@
 #include "/include/dns.h"
 
 /* Library version */
-#define LIB_VERSION    1
+#define LIB_VERSION    40
 #define LIB_REVISION   0
-#define LIB_IDSTRING   "BonAmi mDNS Library 1.0"
+#define LIB_IDSTRING   "BonAmi mDNS Library 40.0"
 
 /* Memory pool sizes */
 #define POOL_PUDDLE_SIZE   4096
@@ -98,6 +98,11 @@ struct BABase {
     ULONG flags;
     ULONG openCount;  /* Library open count */
     APTR memPool;     /* Memory pool for allocations */
+    #ifdef __amigaos4__
+    struct ExecIFace *IExec;
+    struct DOSIFace *IDOS;
+    struct RoadshowIFace *IRoadshow;
+    #endif
 };
 
 /* Function prototypes */
@@ -185,6 +190,72 @@ struct Library *OpenLibrary(void)
         return NULL;
     }
     
+    #ifdef __amigaos4__
+    /* Get interfaces */
+    struct Library *execBase = OpenLibrary("exec.library", 40);
+    if (!execBase) {
+        DeleteMsgPort(base->replyPort);
+        DeletePool(base->memPool);
+        FreeVec(base);
+        return NULL;
+    }
+    
+    base->IExec = (struct ExecIFace *)GetInterface(execBase, "main", 1, NULL);
+    if (!base->IExec) {
+        CloseLibrary(execBase);
+        DeleteMsgPort(base->replyPort);
+        DeletePool(base->memPool);
+        FreeVec(base);
+        return NULL;
+    }
+    
+    struct Library *dosBase = OpenLibrary("dos.library", 40);
+    if (!dosBase) {
+        DropInterface((struct Interface *)base->IExec);
+        CloseLibrary(execBase);
+        DeleteMsgPort(base->replyPort);
+        DeletePool(base->memPool);
+        FreeVec(base);
+        return NULL;
+    }
+    
+    base->IDOS = (struct DOSIFace *)GetInterface(dosBase, "main", 1, NULL);
+    if (!base->IDOS) {
+        CloseLibrary(dosBase);
+        DropInterface((struct Interface *)base->IExec);
+        CloseLibrary(execBase);
+        DeleteMsgPort(base->replyPort);
+        DeletePool(base->memPool);
+        FreeVec(base);
+        return NULL;
+    }
+    
+    struct Library *roadshowBase = OpenLibrary("roadshow.library", 40);
+    if (!roadshowBase) {
+        DropInterface((struct Interface *)base->IDOS);
+        CloseLibrary(dosBase);
+        DropInterface((struct Interface *)base->IExec);
+        CloseLibrary(execBase);
+        DeleteMsgPort(base->replyPort);
+        DeletePool(base->memPool);
+        FreeVec(base);
+        return NULL;
+    }
+    
+    base->IRoadshow = (struct RoadshowIFace *)GetInterface(roadshowBase, "main", 1, NULL);
+    if (!base->IRoadshow) {
+        CloseLibrary(roadshowBase);
+        DropInterface((struct Interface *)base->IDOS);
+        CloseLibrary(dosBase);
+        DropInterface((struct Interface *)base->IExec);
+        CloseLibrary(execBase);
+        DeleteMsgPort(base->replyPort);
+        DeletePool(base->memPool);
+        FreeVec(base);
+        return NULL;
+    }
+    #endif
+    
     /* Set initial open count */
     base->openCount = 1;
     
@@ -237,6 +308,30 @@ void CloseLibrary(void)
     if (base->replyPort) {
         DeleteMsgPort(base->replyPort);
     }
+    
+    #ifdef __amigaos4__
+    /* Drop interfaces */
+    if (base->IRoadshow) {
+        struct Library *roadshowBase = base->IRoadshow->Data.LibBase;
+        DropInterface((struct Interface *)base->IRoadshow);
+        CloseLibrary(roadshowBase);
+        base->IRoadshow = NULL;
+    }
+    
+    if (base->IDOS) {
+        struct Library *dosBase = base->IDOS->Data.LibBase;
+        DropInterface((struct Interface *)base->IDOS);
+        CloseLibrary(dosBase);
+        base->IDOS = NULL;
+    }
+    
+    if (base->IExec) {
+        struct Library *execBase = base->IExec->Data.LibBase;
+        DropInterface((struct Interface *)base->IExec);
+        CloseLibrary(execBase);
+        base->IExec = NULL;
+    }
+    #endif
     
     /* Delete memory pool */
     DeletePool(base->memPool);
