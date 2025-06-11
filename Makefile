@@ -1,25 +1,63 @@
-CC = vc
-CFLAGS = -c -O2 -D__AMIGA__ -D__USE_INLINE__ -I./include
-LDFLAGS = -lamiga -lauto
+# BonAmi mDNS Library and Daemon for AmigaOS 4
+# Copyright (C) 2024 Tim
+#
+# This Makefile is for building on AmigaOS 4 with GCC and newlib
+# For classic AmigaOS builds, use the SMAKEFILE instead
 
+# Compiler and flags
+CC = gcc
+CFLAGS = -mcrt=newlib -O2 -Wall -Werror -std=c89 -D__USE_INLINE__ -D__USE_BASETYPE__ -D__amigaos4__
+LDFLAGS = -mcrt=newlib
+
+# Directories
 SRC_DIR = src
+INCLUDE_DIR = include
 OBJ_DIR = obj
+LIB_DIR = lib
 BIN_DIR = bin
 
-SRCS = $(wildcard $(SRC_DIR)/*.c)
-OBJS = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+# Source files
+LIB_SRCS = $(SRC_DIR)/bonami_lib.c
+DAEMON_SRCS = $(SRC_DIR)/bonami.c
 
-.PHONY: all clean
+# Object files
+LIB_OBJS = $(LIB_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+DAEMON_OBJS = $(DAEMON_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
-all: $(BIN_DIR)/bonamid
+# Targets
+LIB_TARGET = $(LIB_DIR)/bonami.library
+DAEMON_TARGET = $(BIN_DIR)/bonamid
 
-$(BIN_DIR)/bonamid: $(OBJS)
-	@mkdir -p $(BIN_DIR)
-	$(CC) -o $@ $^ $(LDFLAGS)
+# Default target
+all: directories $(LIB_TARGET) $(DAEMON_TARGET)
 
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
-	@mkdir -p $(OBJ_DIR)
-	$(CC) $(CFLAGS) -o $@ $<
+# Create directories
+directories:
+	@mkdir -p $(OBJ_DIR) $(LIB_DIR) $(BIN_DIR)
 
+# Build library
+$(LIB_TARGET): $(LIB_OBJS)
+	$(CC) $(LDFLAGS) -nostartfiles -o $@ $(LIB_OBJS) -ldebug
+
+# Build daemon
+$(DAEMON_TARGET): $(DAEMON_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $(DAEMON_OBJS) -ldebug
+
+# Compile library objects
+$(OBJ_DIR)/bonami_lib.o: $(SRC_DIR)/bonami_lib.c $(INCLUDE_DIR)/bonami.h
+	$(CC) $(CFLAGS) -I$(INCLUDE_DIR) -c $< -o $@
+
+# Compile daemon objects
+$(OBJ_DIR)/bonami.o: $(SRC_DIR)/bonami.c $(INCLUDE_DIR)/bonami.h
+	$(CC) $(CFLAGS) -I$(INCLUDE_DIR) -c $< -o $@
+
+# Clean
 clean:
-	rm -rf $(OBJ_DIR) $(BIN_DIR) 
+	rm -rf $(OBJ_DIR) $(LIB_DIR) $(BIN_DIR)
+
+# Install
+install: all
+	cp $(LIB_TARGET) LIBS:
+	cp $(DAEMON_TARGET) C:
+
+.PHONY: all clean install directories 
