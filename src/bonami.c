@@ -65,6 +65,8 @@ struct InterfaceState {
     struct List *services;  /* Services on this interface */
     struct List *probes;    /* Services being probed */
     struct List *announces; /* Services being announced */
+    struct List *records;   /* DNS records on this interface */
+    struct List *questions;  /* DNS questions on this interface */
 };
 
 /* Cache entry */
@@ -163,6 +165,15 @@ static void startServiceAnnouncement(struct InterfaceState *iface, struct BAServ
 static void processServiceStates(struct InterfaceState *iface);
 static void handleSignals(void);
 static void processUpdateCallbacks(struct BAService *service);
+static struct DNSRecord *createPTRRecord(const char *type, const char *name);
+static struct DNSRecord *createSRVRecord(const char *name, UWORD port, const char *host);
+static struct DNSRecord *createTXTRecord(const char *name, const struct BATXTRecord *txt);
+static struct DNSQuestion *createProbeQuestion(const char *name, const char *type);
+static void addRecord(struct InterfaceState *iface, struct DNSRecord *record);
+static void addQuestion(struct InterfaceState *iface, struct DNSQuestion *question);
+static void removeRecord(struct InterfaceState *iface, const char *name, UWORD type);
+static void scheduleAnnouncement(struct InterfaceState *iface, struct DNSRecord *record);
+static void scheduleQuery(struct InterfaceState *iface, struct DNSQuestion *question);
 
 /* Main function */
 int main(int argc, char **argv) {
@@ -511,4 +522,555 @@ int main(void)
     cleanupDaemon();
     
     return 0;
+}
+
+/* Validate service type */
+static LONG validateServiceType(const char *type)
+{
+    const char *p;
+    BOOL hasService = FALSE;
+    BOOL hasProtocol = FALSE;
+    BOOL hasLocal = FALSE;
+    
+    if (!type || !type[0]) {
+        return BA_BADTYPE;
+    }
+    
+    /* Check for leading underscore */
+    if (type[0] != '_') {
+        return BA_BADTYPE;
+    }
+    
+    /* Parse service type */
+    p = type + 1;  /* Skip leading underscore */
+    
+    /* Service name */
+    while (*p && *p != '_') {
+        if (!isalnum(*p) && *p != '-') {
+            return BA_BADTYPE;
+        }
+        hasService = TRUE;
+        p++;
+    }
+    
+    if (!hasService) {
+        return BA_BADTYPE;
+    }
+    
+    /* Check for protocol separator */
+    if (*p != '_') {
+        return BA_BADTYPE;
+    }
+    p++;
+    
+    /* Protocol */
+    if (strncmp(p, "tcp", 3) != 0 && strncmp(p, "udp", 3) != 0) {
+        return BA_BADTYPE;
+    }
+    hasProtocol = TRUE;
+    p += 3;
+    
+    /* Check for .local suffix */
+    if (strcmp(p, ".local") != 0) {
+        return BA_BADTYPE;
+    }
+    hasLocal = TRUE;
+    
+    return BA_OK;
+}
+
+/* Process incoming messages */
+static void processMessage(struct BAMessage *msg)
+{
+    struct BAServiceNode *service;
+    struct BADiscoveryNode *discovery;
+    LONG result;
+    
+    switch (msg->type) {
+        case MSG_REGISTER:
+            /* Validate service type */
+            result = validateServiceType(msg->data.register_msg.service.type);
+            if (result != BA_OK) {
+                msg->data.register_msg.result = result;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Check for duplicate service */
+            service = findService(msg->data.register_msg.service.name,
+                                msg->data.register_msg.service.type);
+            if (service) {
+                msg->data.register_msg.result = BA_DUPLICATE;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Create service node */
+            service = AllocMem(sizeof(struct BAServiceNode), MEMF_CLEAR);
+            if (!service) {
+                msg->data.register_msg.result = BA_NOMEM;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Initialize service */
+            memcpy(&service->service, &msg->data.register_msg.service,
+                   sizeof(struct BAService));
+            service->state = 0;  /* Start probing */
+            service->probeCount = 0;
+            service->announceCount = 0;
+            
+            /* Add to service list */
+            AddTail(bonami.services, (struct Node *)service);
+            
+            /* Start probing */
+            startServiceProbing(&bonami.interfaces[0], &service->service);
+            
+            msg->data.register_msg.result = BA_OK;
+            break;
+            
+        case MSG_UNREGISTER:
+            /* Find service */
+            service = findService(msg->data.unregister_msg.name,
+                                msg->data.unregister_msg.type);
+            if (!service) {
+                msg->data.unregister_msg.result = BA_NOTFOUND;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Remove service records */
+            removeServiceRecords(service);
+            
+            /* Remove from list */
+            Remove((struct Node *)service);
+            FreeMem(service, sizeof(struct BAServiceNode));
+            
+            msg->data.unregister_msg.result = BA_OK;
+            break;
+            
+        case MSG_DISCOVER:
+            /* Validate service type */
+            result = validateServiceType(msg->data.discover_msg.type);
+            if (result != BA_OK) {
+                msg->data.discover_msg.result = result;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Create discovery node */
+            discovery = AllocMem(sizeof(struct BADiscoveryNode), MEMF_CLEAR);
+            if (!discovery) {
+                msg->data.discover_msg.result = BA_NOMEM;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Initialize discovery */
+            strncpy(discovery->discovery.type, msg->data.discover_msg.type,
+                    sizeof(discovery->discovery.type) - 1);
+            discovery->discovery.services = msg->data.discover_msg.services;
+            discovery->running = TRUE;
+            
+            /* Add to discovery list */
+            AddTail(bonami.services, (struct Node *)discovery);
+            
+            msg->data.discover_msg.result = BA_OK;
+            break;
+            
+        case MSG_STOP:
+            /* Find discovery */
+            discovery = findDiscovery(msg->data.discover_msg.type);
+            if (!discovery) {
+                msg->data.discover_msg.result = BA_NOTFOUND;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Stop discovery */
+            discovery->running = FALSE;
+            
+            /* Remove from list */
+            Remove((struct Node *)discovery);
+            FreeMem(discovery, sizeof(struct BADiscoveryNode));
+            
+            msg->data.discover_msg.result = BA_OK;
+            break;
+            
+        case MSG_MONITOR:
+            /* Validate service type */
+            result = validateServiceType(msg->data.monitor_msg.type);
+            if (result != BA_OK) {
+                msg->data.monitor_msg.result = result;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Add monitor */
+            AddTail(bonami.monitors, (struct Node *)msg->data.monitor_msg.monitor);
+            
+            msg->data.monitor_msg.result = BA_OK;
+            break;
+            
+        case MSG_CONFIG:
+            /* Update configuration */
+            memcpy(&bonami.config, &msg->data.config_msg.config,
+                   sizeof(struct BAConfig));
+            
+            msg->data.config_msg.result = BA_OK;
+            break;
+            
+        case MSG_SHUTDOWN:
+            bonami.running = FALSE;
+            break;
+    }
+    
+    /* Reply to message */
+    ReplyMsg((struct Message *)msg);
+}
+
+/* Find a service by name and type */
+static struct BAServiceNode *findService(const char *name, const char *type)
+{
+    struct BAServiceNode *node;
+    
+    for (node = (struct BAServiceNode *)bonami.services->lh_Head;
+         node->node.ln_Succ;
+         node = (struct BAServiceNode *)node->node.ln_Succ) {
+        if (strcmp(node->service.name, name) == 0 &&
+            strcmp(node->service.type, type) == 0) {
+            return node;
+        }
+    }
+    
+    return NULL;
+}
+
+/* Find a discovery by type */
+static struct BADiscoveryNode *findDiscovery(const char *type)
+{
+    struct BADiscoveryNode *node;
+    
+    for (node = (struct BADiscoveryNode *)bonami.services->lh_Head;
+         node->node.ln_Succ;
+         node = (struct BADiscoveryNode *)node->node.ln_Succ) {
+        if (strcmp(node->discovery.type, type) == 0) {
+            return node;
+        }
+    }
+    
+    return NULL;
+}
+
+/* Remove all records for a service */
+static void removeServiceRecords(struct BAServiceNode *service)
+{
+    struct InterfaceState *iface;
+    LONG i;
+    
+    /* Remove from all interfaces */
+    for (i = 0; i < bonami.numInterfaces; i++) {
+        iface = &bonami.interfaces[i];
+        if (iface->active) {
+            /* Remove PTR record */
+            removeRecord(iface, service->service.type, DNS_TYPE_PTR);
+            
+            /* Remove SRV record */
+            removeRecord(iface, service->service.name, DNS_TYPE_SRV);
+            
+            /* Remove TXT record */
+            removeRecord(iface, service->service.name, DNS_TYPE_TXT);
+        }
+    }
+}
+
+/* Start probing for a service */
+static void startServiceProbing(struct InterfaceState *iface, struct BAService *service)
+{
+    struct DNSRecord *record;
+    struct DNSQuestion *question;
+    LONG i;
+    
+    /* Create PTR record */
+    record = createPTRRecord(service->type, service->name);
+    if (!record) {
+        return;
+    }
+    
+    /* Add to interface */
+    addRecord(iface, record);
+    
+    /* Create SRV record */
+    record = createSRVRecord(service->name, service->port, service->host);
+    if (!record) {
+        return;
+    }
+    
+    /* Add to interface */
+    addRecord(iface, record);
+    
+    /* Create TXT record */
+    record = createTXTRecord(service->name, service->txt);
+    if (!record) {
+        return;
+    }
+    
+    /* Add to interface */
+    addRecord(iface, record);
+    
+    /* Create probe questions */
+    for (i = 0; i < 3; i++) {
+        question = createProbeQuestion(service->name, service->type);
+        if (!question) {
+            continue;
+        }
+        
+        /* Add to interface */
+        addQuestion(iface, question);
+    }
+}
+
+/* Create a PTR record */
+static struct DNSRecord *createPTRRecord(const char *type, const char *name)
+{
+    struct DNSRecord *record;
+    char *ptrName;
+    
+    /* Allocate record */
+    record = AllocMem(sizeof(struct DNSRecord), MEMF_CLEAR);
+    if (!record) {
+        return NULL;
+    }
+    
+    /* Create PTR name */
+    ptrName = AllocMem(strlen(type) + 6, MEMF_CLEAR);
+    if (!ptrName) {
+        FreeMem(record, sizeof(struct DNSRecord));
+        return NULL;
+    }
+    
+    /* Format PTR name */
+    sprintf(ptrName, "%s.local", type);
+    
+    /* Initialize record */
+    record->name = ptrName;
+    record->type = DNS_TYPE_PTR;
+    record->class = DNS_CLASS_IN;
+    record->ttl = 120;  /* 2 minutes */
+    record->data.ptr.name = strdup(name);
+    if (!record->data.ptr.name) {
+        FreeMem(ptrName, strlen(type) + 6);
+        FreeMem(record, sizeof(struct DNSRecord));
+        return NULL;
+    }
+    
+    return record;
+}
+
+/* Create an SRV record */
+static struct DNSRecord *createSRVRecord(const char *name, UWORD port, const char *host)
+{
+    struct DNSRecord *record;
+    
+    /* Allocate record */
+    record = AllocMem(sizeof(struct DNSRecord), MEMF_CLEAR);
+    if (!record) {
+        return NULL;
+    }
+    
+    /* Initialize record */
+    record->name = strdup(name);
+    if (!record->name) {
+        FreeMem(record, sizeof(struct DNSRecord));
+        return NULL;
+    }
+    
+    record->type = DNS_TYPE_SRV;
+    record->class = DNS_CLASS_IN;
+    record->ttl = 120;  /* 2 minutes */
+    record->data.srv.priority = 0;
+    record->data.srv.weight = 0;
+    record->data.srv.port = port;
+    record->data.srv.target = strdup(host);
+    if (!record->data.srv.target) {
+        FreeMem(record->name, strlen(name) + 1);
+        FreeMem(record, sizeof(struct DNSRecord));
+        return NULL;
+    }
+    
+    return record;
+}
+
+/* Create a TXT record */
+static struct DNSRecord *createTXTRecord(const char *name, const struct BATXTRecord *txt)
+{
+    struct DNSRecord *record;
+    struct BATXTRecord *current;
+    LONG length = 0;
+    char *data;
+    
+    /* Allocate record */
+    record = AllocMem(sizeof(struct DNSRecord), MEMF_CLEAR);
+    if (!record) {
+        return NULL;
+    }
+    
+    /* Initialize record */
+    record->name = strdup(name);
+    if (!record->name) {
+        FreeMem(record, sizeof(struct DNSRecord));
+        return NULL;
+    }
+    
+    record->type = DNS_TYPE_TXT;
+    record->class = DNS_CLASS_IN;
+    record->ttl = 120;  /* 2 minutes */
+    
+    /* Calculate total length */
+    for (current = (struct BATXTRecord *)txt; current; current = current->next) {
+        length += strlen(current->key) + strlen(current->value) + 2;
+    }
+    
+    /* Allocate data */
+    data = AllocMem(length + 1, MEMF_CLEAR);
+    if (!data) {
+        FreeMem(record->name, strlen(name) + 1);
+        FreeMem(record, sizeof(struct DNSRecord));
+        return NULL;
+    }
+    
+    /* Format data */
+    for (current = (struct BATXTRecord *)txt; current; current = current->next) {
+        strcat(data, current->key);
+        strcat(data, "=");
+        strcat(data, current->value);
+        if (current->next) {
+            strcat(data, " ");
+        }
+    }
+    
+    record->data.txt.data = data;
+    record->data.txt.length = length;
+    
+    return record;
+}
+
+/* Create a probe question */
+static struct DNSQuestion *createProbeQuestion(const char *name, const char *type)
+{
+    struct DNSQuestion *question;
+    char *questionName;
+    
+    /* Allocate question */
+    question = AllocMem(sizeof(struct DNSQuestion), MEMF_CLEAR);
+    if (!question) {
+        return NULL;
+    }
+    
+    /* Create question name */
+    questionName = AllocMem(strlen(name) + strlen(type) + 8, MEMF_CLEAR);
+    if (!questionName) {
+        FreeMem(question, sizeof(struct DNSQuestion));
+        return NULL;
+    }
+    
+    /* Format question name */
+    sprintf(questionName, "%s.%s.local", name, type);
+    
+    /* Initialize question */
+    question->name = questionName;
+    question->type = DNS_TYPE_ANY;
+    question->class = DNS_CLASS_IN;
+    question->unicast = FALSE;
+    
+    return question;
+}
+
+/* Add a record to an interface */
+static void addRecord(struct InterfaceState *iface, struct DNSRecord *record)
+{
+    /* Add to record list */
+    AddTail(iface->records, (struct Node *)record);
+    
+    /* Schedule announcement */
+    scheduleAnnouncement(iface, record);
+}
+
+/* Add a question to an interface */
+static void addQuestion(struct InterfaceState *iface, struct DNSQuestion *question)
+{
+    /* Add to question list */
+    AddTail(iface->questions, (struct Node *)question);
+    
+    /* Schedule query */
+    scheduleQuery(iface, question);
+}
+
+/* Remove a record from an interface */
+static void removeRecord(struct InterfaceState *iface, const char *name, UWORD type)
+{
+    struct DNSRecord *record;
+    struct DNSRecord *next;
+    
+    for (record = (struct DNSRecord *)iface->records->lh_Head;
+         record->node.ln_Succ;
+         record = next) {
+        next = (struct DNSRecord *)record->node.ln_Succ;
+        
+        if (strcmp(record->name, name) == 0 && record->type == type) {
+            /* Remove from list */
+            Remove((struct Node *)record);
+            
+            /* Free memory */
+            FreeMem(record->name, strlen(record->name) + 1);
+            if (record->type == DNS_TYPE_PTR) {
+                FreeMem(record->data.ptr.name, strlen(record->data.ptr.name) + 1);
+            } else if (record->type == DNS_TYPE_SRV) {
+                FreeMem(record->data.srv.target, strlen(record->data.srv.target) + 1);
+            } else if (record->type == DNS_TYPE_TXT) {
+                FreeMem(record->data.txt.data, record->data.txt.length + 1);
+            }
+            FreeMem(record, sizeof(struct DNSRecord));
+        }
+    }
+}
+
+/* Schedule a record announcement */
+static void scheduleAnnouncement(struct InterfaceState *iface, struct DNSRecord *record)
+{
+    struct Announcement *announce;
+    
+    /* Allocate announcement */
+    announce = AllocMem(sizeof(struct Announcement), MEMF_CLEAR);
+    if (!announce) {
+        return;
+    }
+    
+    /* Initialize announcement */
+    announce->record = record;
+    announce->count = 0;
+    announce->nextTime = GetSysTime() + 1;  /* Start in 1 second */
+    
+    /* Add to announcement list */
+    AddTail(iface->announces, (struct Node *)announce);
+}
+
+/* Schedule a question query */
+static void scheduleQuery(struct InterfaceState *iface, struct DNSQuestion *question)
+{
+    struct Probe *probe;
+    
+    /* Allocate probe */
+    probe = AllocMem(sizeof(struct Probe), MEMF_CLEAR);
+    if (!probe) {
+        return;
+    }
+    
+    /* Initialize probe */
+    probe->question = question;
+    probe->count = 0;
+    probe->nextTime = GetSysTime() + 1;  /* Start in 1 second */
+    
+    /* Add to probe list */
+    AddTail(iface->probes, (struct Node *)probe);
 } 

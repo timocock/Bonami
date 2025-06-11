@@ -91,6 +91,7 @@ static LONG sendMessage(struct BABase *base, struct BAMessage *msg);
 static LONG waitForReply(struct BABase *base, struct BAMessage *msg);
 static void monitorTask(void *arg);
 static BOOL matchFilter(struct BAService *service, struct BAFilter *filter);
+static LONG validateServiceType(const char *type);
 
 /* Library open */
 struct Library *OpenLibrary(void)
@@ -182,6 +183,12 @@ LONG BARegisterService(struct BAService *service)
     
     if (!service || !service->name[0] || !service->type[0]) {
         return BA_BADPARAM;
+    }
+    
+    /* Validate service type */
+    result = validateServiceType(service->type);
+    if (result != BA_OK) {
+        return result;
     }
     
     /* Obtain semaphore */
@@ -743,4 +750,59 @@ LONG BAUnregisterUpdateCallback(const char *name,
     FreeMem(msg, sizeof(struct BAMessage));
     
     return result;
+}
+
+/* Validate service type */
+static LONG validateServiceType(const char *type)
+{
+    const char *p;
+    BOOL hasService = FALSE;
+    BOOL hasProtocol = FALSE;
+    BOOL hasLocal = FALSE;
+    
+    if (!type || !type[0]) {
+        return BA_BADTYPE;
+    }
+    
+    /* Check for leading underscore */
+    if (type[0] != '_') {
+        return BA_BADTYPE;
+    }
+    
+    /* Parse service type */
+    p = type + 1;  /* Skip leading underscore */
+    
+    /* Service name */
+    while (*p && *p != '_') {
+        if (!isalnum(*p) && *p != '-') {
+            return BA_BADTYPE;
+        }
+        hasService = TRUE;
+        p++;
+    }
+    
+    if (!hasService) {
+        return BA_BADTYPE;
+    }
+    
+    /* Check for protocol separator */
+    if (*p != '_') {
+        return BA_BADTYPE;
+    }
+    p++;
+    
+    /* Protocol */
+    if (strncmp(p, "tcp", 3) != 0 && strncmp(p, "udp", 3) != 0) {
+        return BA_BADTYPE;
+    }
+    hasProtocol = TRUE;
+    p += 3;
+    
+    /* Check for .local suffix */
+    if (strcmp(p, ".local") != 0) {
+        return BA_BADTYPE;
+    }
+    hasLocal = TRUE;
+    
+    return BA_OK;
 } 
