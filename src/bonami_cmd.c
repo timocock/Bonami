@@ -14,20 +14,20 @@
 /* Command structure */
 struct Command {
     const char *name;
-    const char *usage;
+    const char *template;
     const char *description;
-    LONG (*handler)(int argc, char **argv);
+    LONG (*handler)(struct RDArgs *args);
 };
 
 /* Forward declarations */
-static LONG cmd_discover(int argc, char **argv);
-static LONG cmd_register(int argc, char **argv);
-static LONG cmd_unregister(int argc, char **argv);
-static LONG cmd_list(int argc, char **argv);
-static LONG cmd_resolve(int argc, char **argv);
-static LONG cmd_monitor(int argc, char **argv);
-static LONG cmd_config(int argc, char **argv);
-static LONG cmd_status(int argc, char **argv);
+static LONG cmd_discover(struct RDArgs *args);
+static LONG cmd_register(struct RDArgs *args);
+static LONG cmd_unregister(struct RDArgs *args);
+static LONG cmd_list(struct RDArgs *args);
+static LONG cmd_resolve(struct RDArgs *args);
+static LONG cmd_monitor(struct RDArgs *args);
+static LONG cmd_config(struct RDArgs *args);
+static LONG cmd_status(struct RDArgs *args);
 static void print_usage(const char *cmd);
 static void print_help(void);
 
@@ -35,49 +35,49 @@ static void print_help(void);
 static struct Command commands[] = {
     {
         "discover",
-        "discover <type> [--filter key=value] [--timeout seconds]",
+        "TYPE/K, FILTER/K, TIMEOUT/N",
         "Discover services of specified type",
         cmd_discover
     },
     {
         "register",
-        "register <name> <type> <port> [--txt key=value]...",
+        "NAME/K, TYPE/K, PORT/N, TXT/M",
         "Register a new service",
         cmd_register
     },
     {
         "unregister",
-        "unregister <name> <type>",
+        "NAME/K, TYPE/K",
         "Unregister a service",
         cmd_unregister
     },
     {
         "list",
-        "list [type]",
+        "TYPE/K",
         "List discovered services",
         cmd_list
     },
     {
         "resolve",
-        "resolve <name> <type>",
+        "NAME/K, TYPE/K",
         "Resolve service details",
         cmd_resolve
     },
     {
         "monitor",
-        "monitor <name> <type> [--interval seconds] [--notify-offline]",
+        "NAME/K, TYPE/K, INTERVAL/N, NOTIFY/S",
         "Monitor service availability",
         cmd_monitor
     },
     {
         "config",
-        "config [--set key=value]...",
+        "SET/M",
         "Get or set configuration",
         cmd_config
     },
     {
         "status",
-        "status",
+        "",
         "Show daemon status",
         cmd_status
     },
@@ -89,6 +89,7 @@ int main(int argc, char **argv)
 {
     struct Library *bonami;
     struct Command *cmd;
+    struct RDArgs *args;
     
     /* Check arguments */
     if (argc < 2) {
@@ -106,8 +107,21 @@ int main(int argc, char **argv)
     /* Find command */
     for (cmd = commands; cmd->name; cmd++) {
         if (strcmp(argv[1], cmd->name) == 0) {
+            /* Parse arguments */
+            args = ReadArgs(cmd->template, argv + 2, NULL);
+            if (!args) {
+                if (IoErr() == ERROR_REQUIRED_ARG_MISSING) {
+                    print_usage(cmd->name);
+                } else {
+                    printf("Error: Invalid arguments\n");
+                }
+                CloseLibrary(bonami);
+                return RETURN_ERROR;
+            }
+            
             /* Execute command */
-            LONG result = cmd->handler(argc - 2, argv + 2);
+            LONG result = cmd->handler(args);
+            FreeArgs(args);
             CloseLibrary(bonami);
             return result;
         }
@@ -121,36 +135,30 @@ int main(int argc, char **argv)
 }
 
 /* Discover command */
-static LONG cmd_discover(int argc, char **argv)
+static LONG cmd_discover(struct RDArgs *args)
 {
     struct BonamiDiscovery discovery;
     struct BonamiFilter filter;
     LONG timeout = 5;
-    int i;
     
-    if (argc < 1) {
-        print_usage("discover");
-        return RETURN_ERROR;
-    }
-    
-    /* Parse arguments */
-    strncpy(discovery.type, argv[0], sizeof(discovery.type) - 1);
+    /* Get arguments */
+    strncpy(discovery.type, (char *)args->RDA_Args[0], sizeof(discovery.type) - 1);
     discovery.callback = NULL;
     discovery.userData = NULL;
     
-    for (i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--filter=", 9) == 0) {
-            char *key = argv[i] + 9;
-            char *value = strchr(key, '=');
-            if (value) {
-                *value++ = '\0';
-                strncpy(filter.txtKey, key, sizeof(filter.txtKey) - 1);
-                strncpy(filter.txtValue, value, sizeof(filter.txtValue) - 1);
-                filter.wildcard = FALSE;
-            }
-        } else if (strncmp(argv[i], "--timeout=", 10) == 0) {
-            timeout = atoi(argv[i] + 10);
+    if (args->RDA_Args[1]) {  /* FILTER */
+        char *key = (char *)args->RDA_Args[1];
+        char *value = strchr(key, '=');
+        if (value) {
+            *value++ = '\0';
+            strncpy(filter.txtKey, key, sizeof(filter.txtKey) - 1);
+            strncpy(filter.txtValue, value, sizeof(filter.txtValue) - 1);
+            filter.wildcard = FALSE;
         }
+    }
+    
+    if (args->RDA_Args[2]) {  /* TIMEOUT */
+        timeout = *(LONG *)args->RDA_Args[2];
     }
     
     /* Start discovery */
@@ -169,39 +177,34 @@ static LONG cmd_discover(int argc, char **argv)
 }
 
 /* Register command */
-static LONG cmd_register(int argc, char **argv)
+static LONG cmd_register(struct RDArgs *args)
 {
     struct BonamiService service;
     struct BonamiTXTRecord *txt = NULL;
-    int i;
+    struct BonamiTXTRecord **txt_ptr = &txt;
+    char **txt_args;
     
-    if (argc < 3) {
-        print_usage("register");
-        return RETURN_ERROR;
-    }
-    
-    /* Parse arguments */
-    strncpy(service.name, argv[0], sizeof(service.name) - 1);
-    strncpy(service.type, argv[1], sizeof(service.type) - 1);
-    service.port = atoi(argv[2]);
+    /* Get arguments */
+    strncpy(service.name, (char *)args->RDA_Args[0], sizeof(service.name) - 1);
+    strncpy(service.type, (char *)args->RDA_Args[1], sizeof(service.type) - 1);
+    service.port = *(LONG *)args->RDA_Args[2];
     service.txt = NULL;
     
     /* Parse TXT records */
-    for (i = 3; i < argc; i++) {
-        if (strncmp(argv[i], "--txt=", 6) == 0) {
-            char *key = argv[i] + 6;
-            char *value = strchr(key, '=');
-            if (value) {
-                *value++ = '\0';
-                struct BonamiTXTRecord *new_txt = BonamiCreateTXTRecord(key, value);
-                if (new_txt) {
-                    new_txt->next = txt;
-                    txt = new_txt;
-                }
+    txt_args = (char **)args->RDA_Args[3];
+    while (*txt_args) {
+        char *key = *txt_args;
+        char *value = strchr(key, '=');
+        if (value) {
+            *value++ = '\0';
+            struct BonamiTXTRecord *new_txt = BonamiCreateTXTRecord(key, value);
+            if (new_txt) {
+                *txt_ptr = new_txt;
+                txt_ptr = &new_txt->next;
             }
         }
+        txt_args++;
     }
-    service.txt = txt;
     
     /* Register service */
     LONG result = BonamiRegisterService(&service);
@@ -222,14 +225,13 @@ static LONG cmd_register(int argc, char **argv)
 }
 
 /* Unregister command */
-static LONG cmd_unregister(int argc, char **argv)
+static LONG cmd_unregister(struct RDArgs *args)
 {
-    if (argc < 2) {
-        print_usage("unregister");
-        return RETURN_ERROR;
-    }
+    LONG result = BonamiUnregisterService(
+        (char *)args->RDA_Args[0],  /* NAME */
+        (char *)args->RDA_Args[1]   /* TYPE */
+    );
     
-    LONG result = BonamiUnregisterService(argv[0], argv[1]);
     if (result != BONAMI_OK) {
         printf("Error: Failed to unregister service (%ld)\n", result);
         return RETURN_ERROR;
@@ -239,11 +241,11 @@ static LONG cmd_unregister(int argc, char **argv)
 }
 
 /* List command */
-static LONG cmd_list(int argc, char **argv)
+static LONG cmd_list(struct RDArgs *args)
 {
     struct BonamiService services[256];
     ULONG numServices = 256;
-    const char *type = argc > 0 ? argv[0] : NULL;
+    const char *type = (char *)args->RDA_Args[0];
     int i;
     
     LONG result = BonamiGetServices(type, services, &numServices);
@@ -272,16 +274,16 @@ static LONG cmd_list(int argc, char **argv)
 }
 
 /* Resolve command */
-static LONG cmd_resolve(int argc, char **argv)
+static LONG cmd_resolve(struct RDArgs *args)
 {
     struct BonamiService service;
     
-    if (argc < 2) {
-        print_usage("resolve");
-        return RETURN_ERROR;
-    }
+    LONG result = BonamiResolveService(
+        (char *)args->RDA_Args[0],  /* NAME */
+        (char *)args->RDA_Args[1],  /* TYPE */
+        &service
+    );
     
-    LONG result = BonamiResolveService(argv[0], argv[1], &service);
     if (result != BONAMI_OK) {
         printf("Error: Failed to resolve service (%ld)\n", result);
         return RETURN_ERROR;
@@ -304,27 +306,26 @@ static LONG cmd_resolve(int argc, char **argv)
 }
 
 /* Monitor command */
-static LONG cmd_monitor(int argc, char **argv)
+static LONG cmd_monitor(struct RDArgs *args)
 {
     LONG interval = 5;
     BOOL notifyOffline = FALSE;
-    int i;
     
-    if (argc < 2) {
-        print_usage("monitor");
-        return RETURN_ERROR;
+    if (args->RDA_Args[2]) {  /* INTERVAL */
+        interval = *(LONG *)args->RDA_Args[2];
     }
     
-    /* Parse arguments */
-    for (i = 2; i < argc; i++) {
-        if (strncmp(argv[i], "--interval=", 11) == 0) {
-            interval = atoi(argv[i] + 11);
-        } else if (strcmp(argv[i], "--notify-offline") == 0) {
-            notifyOffline = TRUE;
-        }
+    if (args->RDA_Args[3]) {  /* NOTIFY */
+        notifyOffline = TRUE;
     }
     
-    LONG result = BonamiMonitorService(argv[0], argv[1], interval, notifyOffline);
+    LONG result = BonamiMonitorService(
+        (char *)args->RDA_Args[0],  /* NAME */
+        (char *)args->RDA_Args[1],  /* TYPE */
+        interval,
+        notifyOffline
+    );
+    
     if (result != BONAMI_OK) {
         printf("Error: Failed to monitor service (%ld)\n", result);
         return RETURN_ERROR;
@@ -334,26 +335,10 @@ static LONG cmd_monitor(int argc, char **argv)
 }
 
 /* Config command */
-static LONG cmd_config(int argc, char **argv)
+static LONG cmd_config(struct RDArgs *args)
 {
     struct BonamiConfig config;
-    int i;
-    
-    if (argc == 0) {
-        /* Get current config */
-        LONG result = BonamiGetConfig(&config);
-        if (result != BONAMI_OK) {
-            printf("Error: Failed to get configuration (%ld)\n", result);
-            return RETURN_ERROR;
-        }
-        
-        printf("Discovery Timeout: %ld seconds\n", config.discoveryTimeout);
-        printf("Resolve Timeout: %ld seconds\n", config.resolveTimeout);
-        printf("TTL: %ld seconds\n", config.ttl);
-        printf("Auto Reconnect: %s\n", config.autoReconnect ? "Yes" : "No");
-        
-        return RETURN_OK;
-    }
+    char **set_args;
     
     /* Get current config */
     LONG result = BonamiGetConfig(&config);
@@ -362,24 +347,32 @@ static LONG cmd_config(int argc, char **argv)
         return RETURN_ERROR;
     }
     
-    /* Parse arguments */
-    for (i = 0; i < argc; i++) {
-        if (strncmp(argv[i], "--set=", 6) == 0) {
-            char *key = argv[i] + 6;
-            char *value = strchr(key, '=');
-            if (value) {
-                *value++ = '\0';
-                if (strcmp(key, "discovery-timeout") == 0) {
-                    config.discoveryTimeout = atoi(value);
-                } else if (strcmp(key, "resolve-timeout") == 0) {
-                    config.resolveTimeout = atoi(value);
-                } else if (strcmp(key, "ttl") == 0) {
-                    config.ttl = atoi(value);
-                } else if (strcmp(key, "auto-reconnect") == 0) {
-                    config.autoReconnect = strcmp(value, "yes") == 0;
-                }
+    if (!args->RDA_Args[0]) {  /* No SET arguments */
+        printf("Discovery Timeout: %ld seconds\n", config.discoveryTimeout);
+        printf("Resolve Timeout: %ld seconds\n", config.resolveTimeout);
+        printf("TTL: %ld seconds\n", config.ttl);
+        printf("Auto Reconnect: %s\n", config.autoReconnect ? "Yes" : "No");
+        return RETURN_OK;
+    }
+    
+    /* Parse SET arguments */
+    set_args = (char **)args->RDA_Args[0];
+    while (*set_args) {
+        char *key = *set_args;
+        char *value = strchr(key, '=');
+        if (value) {
+            *value++ = '\0';
+            if (strcmp(key, "discovery-timeout") == 0) {
+                config.discoveryTimeout = atoi(value);
+            } else if (strcmp(key, "resolve-timeout") == 0) {
+                config.resolveTimeout = atoi(value);
+            } else if (strcmp(key, "ttl") == 0) {
+                config.ttl = atoi(value);
+            } else if (strcmp(key, "auto-reconnect") == 0) {
+                config.autoReconnect = strcmp(value, "yes") == 0;
             }
         }
+        set_args++;
     }
     
     /* Set new config */
@@ -393,7 +386,7 @@ static LONG cmd_config(int argc, char **argv)
 }
 
 /* Status command */
-static LONG cmd_status(int argc, char **argv)
+static LONG cmd_status(struct RDArgs *args)
 {
     struct BonamiInterface interfaces[256];
     ULONG numInterfaces = 256;
@@ -425,7 +418,7 @@ static void print_usage(const char *cmd)
     
     for (c = commands; c->name; c++) {
         if (strcmp(c->name, cmd) == 0) {
-            printf("Usage: bactl %s\n", c->usage);
+            printf("Usage: bactl %s %s\n", c->name, c->template);
             return;
         }
     }
