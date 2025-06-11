@@ -459,8 +459,32 @@ static void processMessage(struct BAMessage *msg)
     
     switch (msg->type) {
         case MSG_REGISTER:
+            /* Validate service name */
+            result = validateServiceName(msg->data.register_msg.service.name);
+            if (result != BA_OK) {
+                msg->data.register_msg.result = result;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
             /* Validate service type */
             result = validateServiceType(msg->data.register_msg.service.type);
+            if (result != BA_OK) {
+                msg->data.register_msg.result = result;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Validate port */
+            result = validatePort(msg->data.register_msg.service.port);
+            if (result != BA_OK) {
+                msg->data.register_msg.result = result;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Validate TXT records */
+            result = validateTXTRecord(msg->data.register_msg.service.txt);
             if (result != BA_OK) {
                 msg->data.register_msg.result = result;
                 ReplyMsg((struct Message *)msg);
@@ -1164,22 +1188,133 @@ static LONG processDNSQuery(struct DNSQuery *query)
 static LONG validateServiceName(const char *name)
 {
     const char *p;
+    BOOL hasDot = FALSE;
+    BOOL lastWasDot = TRUE; // Start with dot to prevent leading dots
     
-    /* Check for empty name */
     if (!name || !*name) {
         return BA_BADNAME;
     }
     
-    /* Check length */
+    // Check length
     if (strlen(name) > 63) {
         return BA_BADNAME;
     }
     
-    /* Check characters */
+    // Check each character and label
     for (p = name; *p; p++) {
-        if (!isalnum(*p) && *p != '-' && *p != '.') {
-            return BA_BADNAME;
+        if (*p == '.') {
+            if (lastWasDot) // No empty labels
+                return BA_BADNAME;
+            lastWasDot = TRUE;
+            hasDot = TRUE;
+            continue;
         }
+        
+        // First character of label must be alphanumeric
+        if (lastWasDot && !isalnum(*p))
+            return BA_BADNAME;
+            
+        // Other characters can be alphanumeric or hyphen
+        if (!isalnum(*p) && *p != '-')
+            return BA_BADNAME;
+            
+        lastWasDot = FALSE;
+    }
+    
+    // Must have at least one dot
+    if (!hasDot)
+        return BA_BADNAME;
+        
+    // Can't end with dot
+    if (lastWasDot)
+        return BA_BADNAME;
+        
+    return BA_OK;
+}
+
+/* Validate TXT record */
+static LONG validateTXTRecord(const struct BATXTRecord *txt)
+{
+    const struct BATXTRecord *current;
+    
+    if (!txt)
+        return BA_OK; // Empty TXT is valid
+        
+    for (current = txt; current; current = current->next) {
+        // Check key length
+        if (!current->key || strlen(current->key) > 63)
+            return BA_BADTXT;
+            
+        // Check value length
+        if (!current->value || strlen(current->value) > 255)
+            return BA_BADTXT;
+            
+        // Check key characters
+        const char *p;
+        for (p = current->key; *p; p++) {
+            if (!isalnum(*p) && *p != '-' && *p != '_')
+                return BA_BADTXT;
+        }
+        
+        // Check for duplicate keys
+        const struct BATXTRecord *check;
+        for (check = txt; check != current; check = check->next) {
+            if (strcmp(check->key, current->key) == 0)
+                return BA_BADTXT;
+        }
+    }
+    
+    return BA_OK;
+}
+
+/* Validate port number */
+static LONG validatePort(UWORD port)
+{
+    if (port == 0 || port > 65535)
+        return BA_BADPORT;
+        
+    // Check for reserved ports
+    if (port < 1024)
+        return BA_BADPORT;
+        
+    return BA_OK;
+}
+
+/* Validate DNS record */
+static LONG validateDNSRecord(const struct DNSRecord *record)
+{
+    if (!record || !record->name)
+        return BA_BADPARAM;
+        
+    // Validate name
+    LONG result = validateServiceName(record->name);
+    if (result != BA_OK)
+        return result;
+        
+    // Validate type
+    switch (record->type) {
+        case DNS_TYPE_A:
+            if (record->rdlength != 4)
+                return BA_BADPARAM;
+            break;
+            
+        case DNS_TYPE_PTR:
+            if (record->rdlength > 255)
+                return BA_BADPARAM;
+            break;
+            
+        case DNS_TYPE_SRV:
+            if (record->rdlength < 6)
+                return BA_BADPARAM;
+            break;
+            
+        case DNS_TYPE_TXT:
+            if (record->rdlength > 255)
+                return BA_BADPARAM;
+            break;
+            
+        default:
+            return BA_BADPARAM;
     }
     
     return BA_OK;
