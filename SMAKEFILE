@@ -24,9 +24,9 @@ CTL_OBJS = $(CTL_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 LIB_OBJS = $(LIB_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 # Targets
-DAEMON_TARGET = $(BIN_DIR)/bonamid
-CTL_TARGET = $(BIN_DIR)/bactl
-LIB_TARGET = $(LIB_DIR)/libbonami.a
+DAEMON_TARGET = $(BIN_DIR)/Bonami
+CTL_TARGET = $(BIN_DIR)/BACtl
+LIB_TARGET = $(LIB_DIR)/bonami.library
 
 # Default target
 all: directories $(DAEMON_TARGET) $(CTL_TARGET) $(LIB_TARGET)
@@ -43,7 +43,7 @@ $(CTL_TARGET): $(CTL_OBJS) $(LIB_TARGET)
 	$(CC) $(LDFLAGS) -o $@ $(CTL_OBJS) $(LIB_TARGET) -ldebug -lauto
 
 $(LIB_TARGET): $(LIB_OBJS)
-	ar rcs $@ $(LIB_OBJS)
+	$(CC) $(LDFLAGS) -nostartfiles -o $@ $(LIB_OBJS) -ldebug
 
 # Compile library objects
 $(OBJ_DIR)/bonami_lib.o: $(SRC_DIR)/bonami_lib.c $(INCLUDE_DIR)/bonami.h
