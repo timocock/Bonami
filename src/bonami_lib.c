@@ -11,13 +11,18 @@
 #include <string.h>
 #include <stdio.h>
 
-#include "../include/bonami.h"
-#include "../include/dns.h"
+#include "/include/bonami.h"
+#include "/include/dns.h"
 
 /* Library version */
 #define LIB_VERSION    1
 #define LIB_REVISION   0
 #define LIB_IDSTRING   "BonAmi mDNS Library 1.0"
+
+/* Memory pool sizes */
+#define POOL_PUDDLE_SIZE   4096
+#define POOL_THRESHOLD     256
+#define POOL_MAX_PUDDLES   16
 
 /* Message types for daemon communication */
 #define MSG_REGISTER   1
@@ -92,6 +97,7 @@ struct BABase {
     struct BAConfig config;
     ULONG flags;
     ULONG openCount;  /* Library open count */
+    APTR memPool;     /* Memory pool for allocations */
 };
 
 /* Function prototypes */
@@ -148,6 +154,13 @@ struct Library *OpenLibrary(void)
     NewList(&base->monitors);
     NewList(&base->updateCallbacks);
     
+    /* Create memory pool */
+    base->memPool = CreatePool(MEMF_ANY, POOL_PUDDLE_SIZE, POOL_THRESHOLD);
+    if (!base->memPool) {
+        FreeVec(base);
+        return NULL;
+    }
+    
     /* Initialize config */
     memset(&base->config, 0, sizeof(struct BAConfig));
     base->config.discoveryTimeout = 5;
@@ -158,6 +171,7 @@ struct Library *OpenLibrary(void)
     /* Create reply port */
     base->replyPort = CreateMsgPort();
     if (!base->replyPort) {
+        DeletePool(base->memPool);
         FreeVec(base);
         return NULL;
     }
@@ -166,6 +180,7 @@ struct Library *OpenLibrary(void)
     base->mainTask = FindTask(NULL);
     if (!base->mainTask) {
         DeleteMsgPort(base->replyPort);
+        DeletePool(base->memPool);
         FreeVec(base);
         return NULL;
     }
@@ -207,7 +222,7 @@ void CloseLibrary(void)
     ObtainSemaphore(&base->lock);
     while (!IsListEmpty(&base->monitors)) {
         struct BAMonitor *monitor = (struct BAMonitor *)RemHead(&base->monitors);
-        FreeMem(monitor, sizeof(struct BAMonitor));
+        FreePooled(base, monitor, sizeof(struct BAMonitor));
     }
     ReleaseSemaphore(&base->lock);
     
@@ -215,13 +230,16 @@ void CloseLibrary(void)
     ObtainSemaphore(&base->lock);
     while (!IsListEmpty(&base->updateCallbacks)) {
         struct BAUpdateCallback *cb = (struct BAUpdateCallback *)RemHead(&base->updateCallbacks);
-        FreeMem(cb, sizeof(struct BAUpdateCallback));
+        FreePooled(base, cb, sizeof(struct BAUpdateCallback));
     }
     ReleaseSemaphore(&base->lock);
     
     if (base->replyPort) {
         DeleteMsgPort(base->replyPort);
     }
+    
+    /* Delete memory pool */
+    DeletePool(base->memPool);
     
     FreeVec(base);
 }
@@ -266,8 +284,8 @@ LONG BARegisterService(struct BAService *service)
     /* Obtain semaphore */
     ObtainSemaphore(&base->lock);
     
-    /* Allocate message */
-    msg = AllocMem(sizeof(struct BAMessage), MEMF_CLEAR);
+    /* Allocate message from pool */
+    msg = AllocPooled(base, sizeof(struct BAMessage));
     if (!msg) {
         ReleaseSemaphore(&base->lock);
         return BA_NOMEM;
@@ -287,7 +305,7 @@ LONG BARegisterService(struct BAService *service)
         }
     }
     
-    FreeMem(msg, sizeof(struct BAMessage));
+    FreePooled(base, msg, sizeof(struct BAMessage));
     
     /* Release semaphore */
     ReleaseSemaphore(&base->lock);
@@ -314,7 +332,7 @@ LONG BAUnregisterService(const char *name, const char *type)
     }
     
     /* Allocate message */
-    msg = AllocMem(sizeof(struct BAMessage), MEMF_CLEAR);
+    msg = AllocPooled(base, sizeof(struct BAMessage));
     if (!msg) {
         return BA_NOMEM;
     }
@@ -334,7 +352,7 @@ LONG BAUnregisterService(const char *name, const char *type)
         }
     }
     
-    FreeMem(msg, sizeof(struct BAMessage));
+    FreePooled(base, msg, sizeof(struct BAMessage));
     
     return result;
 }
@@ -359,7 +377,7 @@ LONG BAStartDiscovery(struct BADiscovery *discovery)
     }
     
     /* Allocate message */
-    msg = AllocMem(sizeof(struct BAMessage), MEMF_CLEAR);
+    msg = AllocPooled(base, sizeof(struct BAMessage));
     if (!msg) {
         return BA_NOMEM;
     }
@@ -379,7 +397,7 @@ LONG BAStartDiscovery(struct BADiscovery *discovery)
         }
     }
     
-    FreeMem(msg, sizeof(struct BAMessage));
+    FreePooled(base, msg, sizeof(struct BAMessage));
     return result;
 }
 
@@ -401,7 +419,7 @@ LONG BAStopDiscovery(struct BADiscovery *discovery)
     }
     
     /* Allocate message */
-    msg = AllocMem(sizeof(struct BAMessage), MEMF_CLEAR);
+    msg = AllocPooled(base, sizeof(struct BAMessage));
     if (!msg) {
         return BA_NOMEM;
     }
@@ -420,7 +438,7 @@ LONG BAStopDiscovery(struct BADiscovery *discovery)
         }
     }
     
-    FreeMem(msg, sizeof(struct BAMessage));
+    FreePooled(base, msg, sizeof(struct BAMessage));
     return result;
 }
 
@@ -450,7 +468,7 @@ LONG BAMonitorService(const char *name,
     }
     
     /* Create monitor structure */
-    monitor = AllocMem(sizeof(struct BAMonitor), MEMF_CLEAR);
+    monitor = AllocPooled(base, sizeof(struct BAMonitor));
     if (!monitor) {
         return BA_NOMEM;
     }
@@ -462,9 +480,9 @@ LONG BAMonitorService(const char *name,
     monitor->notifyOffline = notifyOffline;
     
     /* Allocate message */
-    msg = AllocMem(sizeof(struct BAMessage), MEMF_CLEAR);
+    msg = AllocPooled(base, sizeof(struct BAMessage));
     if (!msg) {
-        FreeMem(monitor, sizeof(struct BAMonitor));
+        FreePooled(base, monitor, sizeof(struct BAMonitor));
         return BA_NOMEM;
     }
     
@@ -478,10 +496,10 @@ LONG BAMonitorService(const char *name,
         /* Add to monitor list */
         AddTail(base->monitors, (struct Node *)monitor);
     } else {
-        FreeMem(monitor, sizeof(struct BAMonitor));
+        FreePooled(base, monitor, sizeof(struct BAMonitor));
     }
     
-    FreeMem(msg, sizeof(struct BAMessage));
+    FreePooled(base, msg, sizeof(struct BAMessage));
     return result;
 }
 
@@ -513,7 +531,7 @@ LONG BAGetServices(const char *type,
     batch.maxServices = *numServices;
     
     /* Allocate message */
-    msg = AllocMem(sizeof(struct BAMessage), MEMF_CLEAR);
+    msg = AllocPooled(base, sizeof(struct BAMessage));
     if (!msg) {
         return BA_NOMEM;
     }
