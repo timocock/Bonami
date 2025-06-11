@@ -80,6 +80,14 @@ struct BonamiDiscoveryNode {
     LONG sock;  /* Multicast socket */
 };
 
+/* SRV record data structure */
+struct SRVRecord {
+    UWORD priority;
+    UWORD weight;
+    UWORD port;
+    char target[256];
+};
+
 /* Global state */
 struct {
     struct SignalSemaphore lock;
@@ -350,8 +358,9 @@ static void processMessage(struct BonamiMessage *msg)
             break;
             
         case BONAMI_MSG_QUERY:
-            /* TODO: Implement DNS query */
-            reply->type = BONAMI_ERROR;
+            processQuery(msg->data.query_msg.result, msg->data.query_msg.resultLen, 
+                         (struct sockaddr_in *)&msg->data.query_msg.from);
+            reply->type = BONAMI_OK;
             break;
             
         case BONAMI_MSG_UPDATE:
@@ -471,6 +480,8 @@ static void processQuery(const UBYTE *data, LONG len, struct sockaddr_in *from)
 {
     struct DNSMessage msg;
     struct BonamiServiceNode *service;
+    UBYTE response[512];
+    LONG responseLen;
     
     /* Parse DNS message */
     if (dnsParseMessage(data, len, &msg) != 0) {
@@ -484,22 +495,102 @@ static void processQuery(const UBYTE *data, LONG len, struct sockaddr_in *from)
         /* Check if it's a service type query */
         if (q->type == DNS_TYPE_PTR && strstr(q->name, "_services._dns-sd._udp.local")) {
             /* Service type enumeration query */
-            /* TODO: Send list of service types */
+            ObtainSemaphore(&bonami.lock);
+            
+            /* Create response message */
+            struct DNSMessage resp;
+            memset(&resp, 0, sizeof(resp));
+            resp.id = msg.id;
+            resp.flags = DNS_FLAG_RESPONSE | DNS_FLAG_AA;
+            resp.numAnswers = 0;
+            
+            /* Add all service types as answers */
+            for (service = (struct BonamiServiceNode *)bonami.services->lh_Head;
+                 service->node.ln_Succ;
+                 service = (struct BonamiServiceNode *)service->node.ln_Succ) {
+                /* Add PTR record for service type */
+                struct DNSRecord *r = &resp.answers[resp.numAnswers++];
+                r->name = "_services._dns-sd._udp.local";
+                r->type = DNS_TYPE_PTR;
+                r->class = DNS_CLASS_IN;
+                r->ttl = MDNS_TTL;
+                r->data = service->service.type;
+            }
+            
+            /* Encode response */
+            responseLen = dnsEncodeMessage(&resp, response, sizeof(response));
+            if (responseLen > 0) {
+                /* Send response */
+                sendMulticast(createMulticastSocket(), response, responseLen);
+            }
+            
+            ReleaseSemaphore(&bonami.lock);
         }
         /* Check if it's a service instance query */
         else if (q->type == DNS_TYPE_PTR && strstr(q->name, "._tcp.local")) {
             /* Service instance query */
-            /* TODO: Send matching service instances */
+            ObtainSemaphore(&bonami.lock);
+            
+            /* Create response message */
+            struct DNSMessage resp;
+            memset(&resp, 0, sizeof(resp));
+            resp.id = msg.id;
+            resp.flags = DNS_FLAG_RESPONSE | DNS_FLAG_AA;
+            resp.numAnswers = 0;
+            
+            /* Add matching service instances as answers */
+            for (service = (struct BonamiServiceNode *)bonami.services->lh_Head;
+                 service->node.ln_Succ;
+                 service = (struct BonamiServiceNode *)service->node.ln_Succ) {
+                if (strcmp(service->service.type, q->name) == 0) {
+                    /* Add PTR record for service instance */
+                    struct DNSRecord *r = &resp.answers[resp.numAnswers++];
+                    r->name = service->service.type;
+                    r->type = DNS_TYPE_PTR;
+                    r->class = DNS_CLASS_IN;
+                    r->ttl = MDNS_TTL;
+                    r->data = service->service.name;
+                }
+            }
+            
+            /* Encode response */
+            responseLen = dnsEncodeMessage(&resp, response, sizeof(response));
+            if (responseLen > 0) {
+                /* Send response */
+                sendMulticast(createMulticastSocket(), response, responseLen);
+            }
+            
+            ReleaseSemaphore(&bonami.lock);
         }
         /* Check if it's a service info query */
         else if (q->type == DNS_TYPE_SRV || q->type == DNS_TYPE_TXT) {
             /* Service info query */
             ObtainSemaphore(&bonami.lock);
             
-            for (service = (struct BonamiServiceNode *)bonami.services->lh_Head;
-                 service->node.ln_Succ;
-                 service = (struct BonamiServiceNode *)service->node.ln_Succ) {
-                /* TODO: Check if service matches query and send response */
+            /* Create response message */
+            struct DNSMessage resp;
+            memset(&resp, 0, sizeof(resp));
+            resp.id = msg.id;
+            resp.flags = DNS_FLAG_RESPONSE | DNS_FLAG_AA;
+            resp.numAnswers = 0;
+            
+            /* Find matching service */
+            service = findService(q->name, NULL);
+            if (service) {
+                /* Add all records for the service */
+                for (ULONG j = 0; j < service->numRecords; j++) {
+                    if (service->records[j].type == q->type) {
+                        memcpy(&resp.answers[resp.numAnswers++], &service->records[j], 
+                               sizeof(struct DNSRecord));
+                    }
+                }
+            }
+            
+            /* Encode response */
+            responseLen = dnsEncodeMessage(&resp, response, sizeof(response));
+            if (responseLen > 0) {
+                /* Send response */
+                sendMulticast(createMulticastSocket(), response, responseLen);
             }
             
             ReleaseSemaphore(&bonami.lock);
@@ -512,6 +603,7 @@ static void processResponse(const UBYTE *data, LONG len, struct sockaddr_in *fro
 {
     struct DNSMessage msg;
     struct BonamiDiscoveryNode *discovery;
+    struct BonamiService service;
     
     /* Parse DNS message */
     if (dnsParseMessage(data, len, &msg) != 0) {
@@ -541,12 +633,35 @@ static void processResponse(const UBYTE *data, LONG len, struct sockaddr_in *fro
         /* Check if it's a service instance */
         else if (r->type == DNS_TYPE_PTR && strstr(r->name, "._tcp.local")) {
             /* Found a service instance */
-            /* TODO: Process service instance */
-        }
-        /* Check if it's service info */
-        else if (r->type == DNS_TYPE_SRV || r->type == DNS_TYPE_TXT) {
-            /* Found service info */
-            /* TODO: Process service info */
+            strncpy(service.name, r->data, sizeof(service.name) - 1);
+            strncpy(service.type, r->name, sizeof(service.type) - 1);
+            
+            /* Look for SRV and TXT records */
+            for (ULONG j = 0; j < msg.numAnswers; j++) {
+                struct DNSRecord *r2 = &msg.answers[j];
+                if (strcmp(r2->name, service.name) == 0) {
+                    if (r2->type == DNS_TYPE_SRV) {
+                        struct SRVRecord *srv = (struct SRVRecord *)r2->data;
+                        service.port = srv->port;
+                    } else if (r2->type == DNS_TYPE_TXT) {
+                        service.txt.data = r2->data;
+                        service.txt.length = strlen(r2->data);
+                    }
+                }
+            }
+            
+            /* Call discovery callback */
+            ObtainSemaphore(&bonami.lock);
+            
+            for (discovery = (struct BonamiDiscoveryNode *)bonami.discoveries->lh_Head;
+                 discovery->node.ln_Succ;
+                 discovery = (struct BonamiDiscoveryNode *)discovery->node.ln_Succ) {
+                if (strcmp(discovery->discovery.type, service.type) == 0) {
+                    discovery->discovery.callback(&service, discovery->discovery.userData);
+                }
+            }
+            
+            ReleaseSemaphore(&bonami.lock);
         }
     }
 }
@@ -593,7 +708,16 @@ static void updateServiceRecords(struct BonamiServiceNode *service)
     srv->type = DNS_TYPE_SRV;
     srv->class = DNS_CLASS_IN;
     srv->ttl = MDNS_TTL;
-    /* TODO: Set SRV data (priority, weight, port, target) */
+    
+    /* Allocate and set SRV data */
+    struct SRVRecord *srvData = AllocMem(sizeof(struct SRVRecord), MEMF_CLEAR);
+    if (srvData) {
+        srvData->priority = 0;  /* Default priority */
+        srvData->weight = 0;    /* Default weight */
+        srvData->port = service->service.port;
+        gethostname(srvData->target, sizeof(srvData->target));
+        srv->data = (char *)srvData;
+    }
     
     /* Create TXT record */
     struct DNSRecord *txt = &service->records[2];
