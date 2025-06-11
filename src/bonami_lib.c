@@ -17,6 +17,7 @@
 /* Library version */
 #define LIB_VERSION    1
 #define LIB_REVISION   0
+#define LIB_IDSTRING   "BonAmi mDNS Library 1.0"
 
 /* Message types for daemon communication */
 #define MSG_REGISTER   1
@@ -83,12 +84,14 @@ struct BAMessage {
 struct BABase {
     struct Library lib;
     struct SignalSemaphore lock;
+    struct SignalSemaphore msgLock;  /* For message handling */
     struct MsgPort *replyPort;
     struct Task *mainTask;
     struct List monitors;
     struct List updateCallbacks;
     struct BAConfig config;
     ULONG flags;
+    ULONG openCount;  /* Library open count */
 };
 
 /* Function prototypes */
@@ -111,9 +114,20 @@ static LONG validateServiceType(const char *type);
 struct Library *OpenLibrary(void)
 {
     struct BABase *base;
+    struct Library *lib;
+    
+    /* Check if library is already open */
+    lib = FindLibrary("bonami.library");
+    if (lib) {
+        base = (struct BABase *)lib;
+        ObtainSemaphore(&base->lock);
+        base->openCount++;
+        ReleaseSemaphore(&base->lock);
+        return lib;
+    }
     
     /* Allocate library base */
-    base = (struct BABase *)AllocMem(sizeof(struct BABase), MEMF_CLEAR | MEMF_PUBLIC);
+    base = (struct BABase *)AllocVec(sizeof(struct BABase), MEMF_CLEAR | MEMF_PUBLIC);
     if (!base) {
         return NULL;
     }
@@ -124,10 +138,11 @@ struct Library *OpenLibrary(void)
     base->lib.lib_Flags = LIBF_SUMUSED | LIBF_CHANGED;
     base->lib.lib_Version = LIB_VERSION;
     base->lib.lib_Revision = LIB_REVISION;
-    base->lib.lib_IdString = "BonAmi mDNS Library";
+    base->lib.lib_IdString = LIB_IDSTRING;
     
-    /* Initialize semaphore */
+    /* Initialize semaphores */
     InitSemaphore(&base->lock);
+    InitSemaphore(&base->msgLock);
     
     /* Initialize lists */
     NewList(&base->monitors);
@@ -143,7 +158,7 @@ struct Library *OpenLibrary(void)
     /* Create reply port */
     base->replyPort = CreateMsgPort();
     if (!base->replyPort) {
-        FreeMem(base, sizeof(struct BABase));
+        FreeVec(base);
         return NULL;
     }
     
@@ -151,9 +166,15 @@ struct Library *OpenLibrary(void)
     base->mainTask = FindTask(NULL);
     if (!base->mainTask) {
         DeleteMsgPort(base->replyPort);
-        FreeMem(base, sizeof(struct BABase));
+        FreeVec(base);
         return NULL;
     }
+    
+    /* Set initial open count */
+    base->openCount = 1;
+    
+    /* Add to system */
+    AddLibrary((struct Library *)base);
     
     return (struct Library *)base;
 }
@@ -169,23 +190,40 @@ void CloseLibrary(void)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
     
+    if (!base) return;
+    
+    /* Decrement open count */
+    ObtainSemaphore(&base->lock);
+    if (--base->openCount > 0) {
+        ReleaseSemaphore(&base->lock);
+        return;
+    }
+    ReleaseSemaphore(&base->lock);
+    
+    /* Remove from system */
+    RemLibrary((struct Library *)base);
+    
     /* Free monitors */
+    ObtainSemaphore(&base->lock);
     while (!IsListEmpty(&base->monitors)) {
         struct BAMonitor *monitor = (struct BAMonitor *)RemHead(&base->monitors);
         FreeMem(monitor, sizeof(struct BAMonitor));
     }
+    ReleaseSemaphore(&base->lock);
     
     /* Free update callbacks */
+    ObtainSemaphore(&base->lock);
     while (!IsListEmpty(&base->updateCallbacks)) {
         struct BAUpdateCallback *cb = (struct BAUpdateCallback *)RemHead(&base->updateCallbacks);
         FreeMem(cb, sizeof(struct BAUpdateCallback));
     }
+    ReleaseSemaphore(&base->lock);
     
     if (base->replyPort) {
         DeleteMsgPort(base->replyPort);
     }
     
-    FreeMem(base, sizeof(struct BABase));
+    FreeVec(base);
 }
 
 /**
@@ -559,11 +597,20 @@ LONG BAGetConfig(struct BAConfig *config)
 static LONG sendMessage(struct BABase *base, struct BAMessage *msg)
 {
     if (!base || !msg) return BA_BADPARAM;
-
+    
+    ObtainSemaphore(&base->msgLock);
+    
+    if (!base->mainTask || !base->replyPort) {
+        ReleaseSemaphore(&base->msgLock);
+        return BA_NOTREADY;
+    }
+    
     msg->msg.mn_ReplyPort = base->replyPort;
     msg->msg.mn_Length = sizeof(struct BAMessage);
-
+    
     PutMsg(base->mainTask, (struct Message *)msg);
+    
+    ReleaseSemaphore(&base->msgLock);
     return BA_OK;
 }
 
@@ -571,9 +618,18 @@ static LONG sendMessage(struct BABase *base, struct BAMessage *msg)
 static LONG waitForReply(struct BABase *base, struct BAMessage *msg)
 {
     if (!base || !msg) return BA_BADPARAM;
-
+    
+    ObtainSemaphore(&base->msgLock);
+    
+    if (!base->replyPort) {
+        ReleaseSemaphore(&base->msgLock);
+        return BA_NOTREADY;
+    }
+    
     WaitPort(base->replyPort);
     GetMsg(base->replyPort);
+    
+    ReleaseSemaphore(&base->msgLock);
     return BA_OK;
 }
 
