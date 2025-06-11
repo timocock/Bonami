@@ -150,7 +150,7 @@ struct Library *OpenLibrary(void)
     }
     
     /* Find daemon port */
-    base->daemonPort = FindPort("Bonami");
+    base->daemonPort = FindPort("BonAmi");
     if (!base->daemonPort) {
         DeleteMsgPort(base->replyPort);
         FreeVec(base);
@@ -254,32 +254,18 @@ void ExpungeLibrary(void)
     /* Nothing to do here */
 }
 
-/* Check if daemon is available */
-static LONG checkDaemon(void)
+/* Check if BonAmi is running */
+static LONG checkBonAmi(void)
 {
-    struct BAMessage *msg;
-    LONG result;
+    struct MsgPort *port;
     
-    /* Create message */
-    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
-    if (!msg) {
-        return BA_NOMEM;
+    /* Try to find BonAmi message port */
+    port = FindPort("BonAmi");
+    if (!port) {
+        return BA_NOT_RUNNING;
     }
     
-    /* Initialize message */
-    msg->type = BA_MSG_PING;
-    
-    /* Send message */
-    #ifdef __amigaos4__
-    result = IBonAmi->BASendMessage(msg);
-    #else
-    result = BASendMessage(msg);
-    #endif
-    
-    /* Free message */
-    FreeVec(msg);
-    
-    return result;
+    return BA_OK;
 }
 
 /* Register service */
@@ -288,10 +274,10 @@ LONG BARegisterService(const struct BAService *service)
     struct BAMessage *msg;
     LONG result;
     
-    /* Check daemon */
-    result = checkDaemon();
+    /* Check if BonAmi is running */
+    result = checkBonAmi();
     if (result != BA_OK) {
-        return BA_DAEMON_NOT_RUNNING;
+        return result;
     }
     
     /* Validate parameters */
@@ -328,10 +314,10 @@ LONG BAUnregisterService(const char *name, const char *type)
     struct BAMessage *msg;
     LONG result;
     
-    /* Check daemon */
-    result = checkDaemon();
+    /* Check if BonAmi is running */
+    result = checkBonAmi();
     if (result != BA_OK) {
-        return BA_DAEMON_NOT_RUNNING;
+        return result;
     }
     
     /* Validate parameters */
@@ -369,10 +355,10 @@ LONG BAStartDiscovery(const struct BADiscovery *discovery)
     struct BAMessage *msg;
     LONG result;
     
-    /* Check daemon */
-    result = checkDaemon();
+    /* Check if BonAmi is running */
+    result = checkBonAmi();
     if (result != BA_OK) {
-        return BA_DAEMON_NOT_RUNNING;
+        return result;
     }
     
     /* Validate parameters */
@@ -409,10 +395,10 @@ LONG BAStopDiscovery(const struct BADiscovery *discovery)
     struct BAMessage *msg;
     LONG result;
     
-    /* Check daemon */
-    result = checkDaemon();
+    /* Check if BonAmi is running */
+    result = checkBonAmi();
     if (result != BA_OK) {
-        return BA_DAEMON_NOT_RUNNING;
+        return result;
     }
     
     /* Validate parameters */
@@ -449,10 +435,10 @@ LONG BAMonitorService(const char *name, const char *type, LONG interval, BOOL no
     struct BAMessage *msg;
     LONG result;
     
-    /* Check daemon */
-    result = checkDaemon();
+    /* Check if BonAmi is running */
+    result = checkBonAmi();
     if (result != BA_OK) {
-        return BA_DAEMON_NOT_RUNNING;
+        return result;
     }
     
     /* Validate parameters */
@@ -492,10 +478,10 @@ LONG BAGetInterfaceStatus(struct BAInterface *interface)
     struct BAMessage *msg;
     LONG result;
     
-    /* Check daemon */
-    result = checkDaemon();
+    /* Check if BonAmi is running */
+    result = checkBonAmi();
     if (result != BA_OK) {
-        return BA_DAEMON_NOT_RUNNING;
+        return result;
     }
     
     /* Validate parameters */
@@ -526,16 +512,16 @@ LONG BAGetInterfaceStatus(struct BAInterface *interface)
     return result;
 }
 
-/* Get daemon status */
-LONG BAGetDaemonStatus(struct BAStatus *status)
+/* Get status */
+LONG BAGetStatus(struct BAStatus *status)
 {
     struct BAMessage *msg;
     LONG result;
     
-    /* Check daemon */
-    result = checkDaemon();
+    /* Check if BonAmi is running */
+    result = checkBonAmi();
     if (result != BA_OK) {
-        return BA_DAEMON_NOT_RUNNING;
+        return result;
     }
     
     /* Validate parameters */
