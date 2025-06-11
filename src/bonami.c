@@ -108,10 +108,10 @@ static struct {
     BOOL running;
     BOOL networkReady;
     LONG logLevel;
-    BPTR logFile;
     char hostname[256];
     LONG cacheTimeout;
     LONG mdnsTTL;
+    ULONG signals;  /* Signal mask for main task */
 } bonami;
 
 /* Function prototypes */
@@ -145,6 +145,46 @@ static LONG checkServiceConflict(const char *name, const char *type);
 static void startServiceProbing(struct InterfaceState *iface, struct BonamiService *service);
 static void startServiceAnnouncement(struct InterfaceState *iface, struct BonamiService *service);
 static void processServiceStates(struct InterfaceState *iface);
+
+/* Log message */
+static void logMessage(LONG level, const char *format, ...)
+{
+    char buffer[256];
+    va_list args;
+    struct DateStamp ds;
+    
+    /* Check log level */
+    if (level > bonami.logLevel) {
+        return;
+    }
+    
+    /* Get current time */
+    DateStamp(&ds);
+    
+    /* Format message */
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    
+    /* Output to console */
+    switch (level) {
+        case LOG_ERROR:
+            printf("ERROR: %s\n", buffer);
+            break;
+        case LOG_WARN:
+            printf("WARN: %s\n", buffer);
+            break;
+        case LOG_INFO:
+            printf("INFO: %s\n", buffer);
+            break;
+        case LOG_DEBUG:
+            printf("DEBUG: %s\n", buffer);
+            break;
+    }
+    
+    /* Flush output */
+    fflush(stdout);
+}
 
 /* Initialize daemon */
 static LONG initDaemon(void)
@@ -232,15 +272,12 @@ static LONG initDaemon(void)
         return result;
     }
     
-    /* Create log file */
-    bonami.logFile = Open(LOG_FILE, MODE_NEWFILE);
-    if (!bonami.logFile) {
-        cleanupDaemon();
-        return BONAMI_ERROR;
-    }
-    
     /* Store main process */
     bonami.mainProc = (struct Process *)FindTask(NULL);
+    
+    /* Set up signal handling */
+    bonami.signals = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E;
+    SetSignal(0, bonami.signals);
     
     /* Create network monitor task */
     bonami.networkProc = (struct Process *)CreateNewProcTags(
@@ -248,17 +285,25 @@ static LONG initDaemon(void)
         NP_Entry, networkMonitorTask,
         NP_StackSize, 4096,
         NP_Priority, 0,
-        TAG_DONE
-    );
+        TAG_DONE);
     if (!bonami.networkProc) {
         cleanupDaemon();
         return BONAMI_ERROR;
     }
     
-    bonami.running = TRUE;
-    bonami.networkReady = FALSE;
+    /* Create discovery task */
+    bonami.discoveryProc = (struct Process *)CreateNewProcTags(
+        NP_Name, "Bonami Discovery",
+        NP_Entry, discoveryTask,
+        NP_StackSize, 4096,
+        NP_Priority, 0,
+        TAG_DONE);
+    if (!bonami.discoveryProc) {
+        cleanupDaemon();
+        return BONAMI_ERROR;
+    }
     
-    logMessage(LOG_INFO, "Bonami daemon initialized");
+    bonami.running = TRUE;
     return BONAMI_OK;
 }
 
@@ -356,37 +401,6 @@ static LONG saveConfig(void)
     return BONAMI_OK;
 }
 
-/* Log message */
-static void logMessage(LONG level, const char *format, ...)
-{
-    char buffer[512];
-    va_list args;
-    struct DateStamp ds;
-    char date[32];
-    char time[32];
-    
-    /* Check log level */
-    if (level > bonami.logLevel) {
-        return;
-    }
-    
-    /* Get current date and time */
-    DateStamp(&ds);
-    Amiga2Date(&ds, date);
-    sprintf(time, "%02ld:%02ld:%02ld", date->hour, date->min, date->sec);
-    
-    /* Format message */
-    va_start(args, format);
-    vsprintf(buffer, format, args);
-    va_end(args);
-    
-    /* Write to log file */
-    if (bonami.logFile) {
-        FPrintf(bonami.logFile, "[%s] %s\n", time, buffer);
-        Flush(bonami.logFile);
-    }
-}
-
 /* Cleanup daemon */
 static void cleanupDaemon(void)
 {
@@ -394,10 +408,7 @@ static void cleanupDaemon(void)
     struct BonamiDiscoveryNode *discovery;
     struct CacheEntry *entry;
     
-    /* Stop daemon */
-    bonami.running = FALSE;
-    
-    /* Signal child processes to stop */
+    /* Stop tasks */
     if (bonami.networkProc) {
         Signal((struct Task *)bonami.networkProc, SIGBREAKF_CTRL_C);
     }
@@ -405,25 +416,15 @@ static void cleanupDaemon(void)
         Signal((struct Task *)bonami.discoveryProc, SIGBREAKF_CTRL_C);
     }
     
-    /* Close log file */
-    if (bonami.logFile) {
-        Close(bonami.logFile);
-        bonami.logFile = NULL;
-    }
-    
-    /* Cleanup interfaces */
-    cleanupInterfaces();
-    
-    /* Free services */
+    /* Clean up services */
     if (bonami.services) {
         while ((service = (struct BonamiServiceNode *)RemHead(bonami.services))) {
-            removeServiceRecords(service);
             FreeMem(service, sizeof(struct BonamiServiceNode));
         }
         FreeMem(bonami.services, sizeof(struct List));
     }
     
-    /* Free discoveries */
+    /* Clean up discoveries */
     if (bonami.discoveries) {
         while ((discovery = (struct BonamiDiscoveryNode *)RemHead(bonami.discoveries))) {
             FreeMem(discovery, sizeof(struct BonamiDiscoveryNode));
@@ -431,13 +432,16 @@ static void cleanupDaemon(void)
         FreeMem(bonami.discoveries, sizeof(struct List));
     }
     
-    /* Free cache */
+    /* Clean up cache */
     if (bonami.cache) {
         while ((entry = (struct CacheEntry *)RemHead(bonami.cache))) {
             FreeMem(entry, sizeof(struct CacheEntry));
         }
         FreeMem(bonami.cache, sizeof(struct List));
     }
+    
+    /* Clean up interfaces */
+    cleanupInterfaces();
     
     /* Close message port */
     if (bonami.port) {

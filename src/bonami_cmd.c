@@ -11,6 +11,9 @@
 
 #include "bonami.h"
 
+/* Version string */
+static const char version[] = "$VER: bactl 1.0 (01.01.2024)";
+
 /* Command structure */
 struct Command {
     const char *name;
@@ -30,6 +33,7 @@ static LONG cmd_config(struct RDArgs *args);
 static LONG cmd_status(struct RDArgs *args);
 static void print_usage(const char *cmd);
 static void print_help(void);
+static void handleSignals(void);
 
 /* Command table */
 static struct Command commands[] = {
@@ -84,6 +88,27 @@ static struct Command commands[] = {
     { NULL, NULL, NULL, NULL }
 };
 
+/* Handle signals */
+static void handleSignals(void)
+{
+    ULONG signals = Wait(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E);
+    
+    if (signals & SIGBREAKF_CTRL_C) {
+        /* Graceful exit */
+        exit(0);
+    }
+    
+    if (signals & SIGBREAKF_CTRL_D) {
+        /* Toggle debug output */
+        printf("Debug output toggled\n");
+    }
+    
+    if (signals & SIGBREAKF_CTRL_E) {
+        /* Emergency exit */
+        exit(1);
+    }
+}
+
 /* Main function */
 int main(int argc, char **argv)
 {
@@ -91,6 +116,9 @@ int main(int argc, char **argv)
     struct Command *cmd;
     struct RDArgs *args;
     LONG result = RETURN_ERROR;
+    
+    /* Set up signal handling */
+    SetSignal(0, SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E);
     
     /* Check arguments */
     if (argc < 2) {
@@ -118,6 +146,11 @@ int main(int argc, char **argv)
                 }
                 CloseLibrary(bonami);
                 return RETURN_ERROR;
+            }
+            
+            /* Check for signals before executing command */
+            if (CheckSignal(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E)) {
+                handleSignals();
             }
             
             /* Execute command */
