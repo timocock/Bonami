@@ -17,9 +17,23 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <proto/exec.h>
+#include <proto/dos.h>
+#include <proto/bsdsocket.h>
+#include <proto/utility.h>
+#include <proto/roadshow.h>
+#include <exec/semaphores.h>
+#include <dos/dos.h>
+#include <dos/dosextens.h>
+#include <utility/tagitem.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <ctype.h>
 
-#include "../include/bonami.h"
-#include "../include/dns.h"
+#include "bonami.h"
+#include "dns.h"
 
 /* Constants */
 #define MDNS_PORT 5353
@@ -115,6 +129,9 @@ static struct {
     struct List *discoveries;
     struct SignalSemaphore lock;
     struct MsgPort *port;
+    struct Process *mainProc;
+    struct Process *networkProc;
+    struct Process *discoveryProc;
     BOOL running;
     BOOL networkReady;
     LONG logLevel;
@@ -235,11 +252,14 @@ static LONG initDaemon(void)
     }
     
     /* Create log file */
-    bonami.logFile = Open(CONFIG_FILE, MODE_NEWFILE);
+    bonami.logFile = Open(LOG_FILE, MODE_NEWFILE);
     if (bonami.logFile < 0) {
         cleanupDaemon();
         return BONAMI_ERROR;
     }
+    
+    /* Store main process */
+    bonami.mainProc = (struct Process *)FindTask(NULL);
     
     bonami.running = TRUE;
     bonami.networkReady = FALSE;
@@ -365,6 +385,14 @@ static void cleanupDaemon(void)
     
     /* Stop daemon */
     bonami.running = FALSE;
+    
+    /* Signal child processes to stop */
+    if (bonami.networkProc) {
+        Signal((struct Task *)bonami.networkProc, SIGBREAKF_CTRL_C);
+    }
+    if (bonami.discoveryProc) {
+        Signal((struct Task *)bonami.discoveryProc, SIGBREAKF_CTRL_C);
+    }
     
     /* Close log file */
     if (bonami.logFile >= 0) {
@@ -1187,19 +1215,32 @@ int main(int argc, char *argv[])
     }
     
     /* Start network monitor task */
-    proc = (struct Process *)FindTask(NULL);
-    proc->pr_Task.tc_Node.ln_Pri = 0;  /* Low priority for monitor */
-    CreateNewProcTags(NP_Entry, (ULONG)networkMonitorTask,
-                      NP_Name, (ULONG)"Bonami Network Monitor",
-                      NP_Priority, 0,
-                      TAG_DONE);
+    bonami.networkProc = (struct Process *)CreateNewProcTags(
+        NP_Entry, (ULONG)networkMonitorTask,
+        NP_Name, (ULONG)"Bonami Monitor",
+        NP_Priority, 0,
+        NP_StackSize, 4096,
+        TAG_DONE
+    );
+    
+    if (!bonami.networkProc) {
+        cleanupDaemon();
+        return BONAMI_ERROR;
+    }
     
     /* Start discovery task */
-    proc->pr_Task.tc_Node.ln_Pri = 0;  /* Low priority for discovery */
-    CreateNewProcTags(NP_Entry, (ULONG)discoveryTask,
-                      NP_Name, (ULONG)"Bonami Discovery",
-                      NP_Priority, 0,
-                      TAG_DONE);
+    bonami.discoveryProc = (struct Process *)CreateNewProcTags(
+        NP_Entry, (ULONG)discoveryTask,
+        NP_Name, (ULONG)"Bonami Discovery",
+        NP_Priority, 0,
+        NP_StackSize, 4096,
+        TAG_DONE
+    );
+    
+    if (!bonami.discoveryProc) {
+        cleanupDaemon();
+        return BONAMI_ERROR;
+    }
     
     /* Main daemon loop */
     while (bonami.running) {
@@ -1212,6 +1253,11 @@ int main(int argc, char *argv[])
             if (msg) {
                 processMessage((struct BonamiMessage *)msg);
             }
+        }
+        
+        /* Check for break signal */
+        if (SetSignal(0, 0) & SIGBREAKF_CTRL_C) {
+            bonami.running = FALSE;
         }
     }
     
