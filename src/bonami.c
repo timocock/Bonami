@@ -44,6 +44,10 @@
 #define LOG_FILE "ENV:Bonami/log"
 #define MAX_INTERFACES 16
 #define CACHE_TIMEOUT 120  /* 2 minutes */
+#define PROBE_WAIT 250     /* 250ms between probes */
+#define PROBE_NUM 3        /* Number of probes */
+#define ANNOUNCE_WAIT 1000 /* 1s between announcements */
+#define ANNOUNCE_NUM 3     /* Number of announcements */
 
 /* Log levels */
 #define LOG_ERROR 0
@@ -64,8 +68,11 @@
 struct InterfaceState {
     struct in_addr addr;
     BOOL active;
+    BOOL linkLocal;
     LONG lastCheck;
     struct List *services;  /* Services on this interface */
+    struct List *probes;    /* Services being probed */
+    struct List *announces; /* Services being announced */
 };
 
 /* Cache entry */
@@ -139,6 +146,15 @@ struct SRVRecord {
     char target[256];
 };
 
+/* Service state */
+struct ServiceState {
+    struct Node node;
+    struct BonamiService service;
+    LONG state;      /* 0=probing, 1=announcing, 2=active */
+    LONG counter;    /* Probe/announce counter */
+    LONG nextTime;   /* Next probe/announce time */
+};
+
 /* Global state */
 static struct {
     struct Library *bsdsocket;
@@ -204,6 +220,9 @@ static struct CacheEntry *findCacheEntry(const char *name, WORD type, WORD class
 static void cleanupCache(void);
 static LONG resolveHostname(void);
 static LONG checkServiceConflict(const char *name, const char *type);
+static void startServiceProbing(struct InterfaceState *iface, struct BonamiService *service);
+static void startServiceAnnouncement(struct InterfaceState *iface, struct BonamiService *service);
+static void processServiceStates(struct InterfaceState *iface);
 
 /* Initialize interfaces */
 static LONG initInterfaces(void)
@@ -234,11 +253,23 @@ static LONG initInterfaces(void)
         bonami.interfaces[bonami.numInterfaces].addr = 
             ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr;
         bonami.interfaces[bonami.numInterfaces].active = FALSE;
+        bonami.interfaces[bonami.numInterfaces].linkLocal = FALSE;
         bonami.interfaces[bonami.numInterfaces].lastCheck = 0;
+        
+        /* Initialize lists */
         bonami.interfaces[bonami.numInterfaces].services = 
             AllocMem(sizeof(struct List), MEMF_CLEAR);
-        if (bonami.interfaces[bonami.numInterfaces].services) {
+        bonami.interfaces[bonami.numInterfaces].probes = 
+            AllocMem(sizeof(struct List), MEMF_CLEAR);
+        bonami.interfaces[bonami.numInterfaces].announces = 
+            AllocMem(sizeof(struct List), MEMF_CLEAR);
+            
+        if (bonami.interfaces[bonami.numInterfaces].services &&
+            bonami.interfaces[bonami.numInterfaces].probes &&
+            bonami.interfaces[bonami.numInterfaces].announces) {
             NewList(bonami.interfaces[bonami.numInterfaces].services);
+            NewList(bonami.interfaces[bonami.numInterfaces].probes);
+            NewList(bonami.interfaces[bonami.numInterfaces].announces);
             bonami.numInterfaces++;
         }
     }
@@ -253,6 +284,7 @@ static void cleanupInterfaces(void)
     LONG i;
     
     for (i = 0; i < bonami.numInterfaces; i++) {
+        /* Free services */
         if (bonami.interfaces[i].services) {
             struct Node *node, *next;
             for (node = bonami.interfaces[i].services->lh_Head; 
@@ -261,6 +293,28 @@ static void cleanupInterfaces(void)
                 FreeMem(node, sizeof(struct BonamiServiceNode));
             }
             FreeMem(bonami.interfaces[i].services, sizeof(struct List));
+        }
+        
+        /* Free probes */
+        if (bonami.interfaces[i].probes) {
+            struct Node *node, *next;
+            for (node = bonami.interfaces[i].probes->lh_Head; 
+                 (next = node->ln_Succ); node = next) {
+                Remove(node);
+                FreeMem(node, sizeof(struct ServiceState));
+            }
+            FreeMem(bonami.interfaces[i].probes, sizeof(struct List));
+        }
+        
+        /* Free announcements */
+        if (bonami.interfaces[i].announces) {
+            struct Node *node, *next;
+            for (node = bonami.interfaces[i].announces->lh_Head; 
+                 (next = node->ln_Succ); node = next) {
+                Remove(node);
+                FreeMem(node, sizeof(struct ServiceState));
+            }
+            FreeMem(bonami.interfaces[i].announces, sizeof(struct List));
         }
     }
     bonami.numInterfaces = 0;
@@ -292,8 +346,16 @@ static LONG checkInterface(struct InterfaceState *iface)
             iface->active = TRUE;
             updateInterfaceServices(iface);
         }
+        
+        /* Check if interface is link-local */
+        ifr.ifr_addr.sa_family = AF_INET;
+        if (ioctl(sock, SIOCGIFADDR, &ifr) >= 0) {
+            struct in_addr addr = ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr;
+            iface->linkLocal = (ntohl(addr.s_addr) & 0xFFFF0000) == 0xA9FE0000;
+        }
     } else {
         iface->active = FALSE;
+        iface->linkLocal = FALSE;
     }
     
     CloseSocket(sock);
@@ -726,6 +788,7 @@ static void networkMonitorTask(void)
         /* Check all interfaces */
         for (i = 0; i < bonami.numInterfaces; i++) {
             checkInterface(&bonami.interfaces[i]);
+            processServiceStates(&bonami.interfaces[i]);
         }
         
         /* Cleanup cache */
@@ -1414,6 +1477,180 @@ static LONG validateServiceType(const char *type)
     }
     
     return BONAMI_OK;
+}
+
+/* Start service probing */
+static void startServiceProbing(struct InterfaceState *iface, struct BonamiService *service)
+{
+    struct ServiceState *state;
+    struct DNSMessage msg;
+    UBYTE buffer[512];
+    LONG len;
+    
+    /* Create service state */
+    state = AllocMem(sizeof(struct ServiceState), MEMF_CLEAR);
+    if (!state) {
+        return;
+    }
+    
+    /* Initialize state */
+    memcpy(&state->service, service, sizeof(struct BonamiService));
+    state->state = 0;  /* Probing */
+    state->counter = 0;
+    state->nextTime = GetSysTime() + PROBE_WAIT;
+    
+    /* Add to probe list */
+    AddTail(iface->probes, (struct Node *)state);
+    
+    /* Create probe message */
+    memset(&msg, 0, sizeof(msg));
+    msg.id = GetSysTime() & 0xFFFF;
+    msg.flags = DNS_FLAG_QR_QUERY;
+    msg.numQuestions = 1;
+    
+    /* Set up question */
+    struct DNSQuestion *q = &msg.questions[0];
+    strncpy(q->name, service->name, sizeof(q->name) - 1);
+    q->type = DNS_TYPE_PTR;
+    q->class = DNS_CLASS_IN;
+    
+    /* Encode message */
+    len = dnsEncodeMessage(&msg, buffer, sizeof(buffer));
+    if (len > 0) {
+        /* Send probe */
+        sendMulticast(iface->addr, buffer, len);
+    }
+}
+
+/* Start service announcement */
+static void startServiceAnnouncement(struct InterfaceState *iface, struct BonamiService *service)
+{
+    struct ServiceState *state;
+    struct DNSMessage msg;
+    UBYTE buffer[512];
+    LONG len;
+    
+    /* Create service state */
+    state = AllocMem(sizeof(struct ServiceState), MEMF_CLEAR);
+    if (!state) {
+        return;
+    }
+    
+    /* Initialize state */
+    memcpy(&state->service, service, sizeof(struct BonamiService));
+    state->state = 1;  /* Announcing */
+    state->counter = 0;
+    state->nextTime = GetSysTime() + ANNOUNCE_WAIT;
+    
+    /* Add to announce list */
+    AddTail(iface->announces, (struct Node *)state);
+    
+    /* Create announcement message */
+    memset(&msg, 0, sizeof(msg));
+    msg.id = GetSysTime() & 0xFFFF;
+    msg.flags = DNS_FLAG_QR_RESPONSE | DNS_FLAG_AA;
+    msg.numAnswers = 1;
+    
+    /* Set up answer */
+    struct DNSRecord *a = &msg.answers[0];
+    strncpy(a->name, service->name, sizeof(a->name) - 1);
+    a->type = DNS_TYPE_PTR;
+    a->class = DNS_CLASS_IN;
+    a->ttl = MDNS_TTL;
+    strncpy(a->data.ptr.name, service->type, sizeof(a->data.ptr.name) - 1);
+    
+    /* Encode message */
+    len = dnsEncodeMessage(&msg, buffer, sizeof(buffer));
+    if (len > 0) {
+        /* Send announcement */
+        sendMulticast(iface->addr, buffer, len);
+    }
+}
+
+/* Process service states */
+static void processServiceStates(struct InterfaceState *iface)
+{
+    struct ServiceState *state, *next;
+    LONG now = GetSysTime();
+    
+    /* Process probes */
+    for (state = (struct ServiceState *)iface->probes->lh_Head;
+         (next = (struct ServiceState *)state->node.ln_Succ);
+         state = next) {
+        if (now >= state->nextTime) {
+            if (++state->counter >= PROBE_NUM) {
+                /* No conflict, start announcement */
+                Remove((struct Node *)state);
+                startServiceAnnouncement(iface, &state->service);
+                FreeMem(state, sizeof(struct ServiceState));
+            } else {
+                /* Send next probe */
+                struct DNSMessage msg;
+                UBYTE buffer[512];
+                LONG len;
+                
+                memset(&msg, 0, sizeof(msg));
+                msg.id = GetSysTime() & 0xFFFF;
+                msg.flags = DNS_FLAG_QR_QUERY;
+                msg.numQuestions = 1;
+                
+                struct DNSQuestion *q = &msg.questions[0];
+                strncpy(q->name, state->service.name, sizeof(q->name) - 1);
+                q->type = DNS_TYPE_PTR;
+                q->class = DNS_CLASS_IN;
+                
+                len = dnsEncodeMessage(&msg, buffer, sizeof(buffer));
+                if (len > 0) {
+                    sendMulticast(iface->addr, buffer, len);
+                }
+                
+                state->nextTime = now + PROBE_WAIT;
+            }
+        }
+    }
+    
+    /* Process announcements */
+    for (state = (struct ServiceState *)iface->announces->lh_Head;
+         (next = (struct ServiceState *)state->node.ln_Succ);
+         state = next) {
+        if (now >= state->nextTime) {
+            if (++state->counter >= ANNOUNCE_NUM) {
+                /* Announcement complete, activate service */
+                Remove((struct Node *)state);
+                struct BonamiServiceNode *service = AllocMem(sizeof(struct BonamiServiceNode), MEMF_CLEAR);
+                if (service) {
+                    memcpy(&service->service, &state->service, sizeof(struct BonamiService));
+                    AddTail(iface->services, (struct Node *)service);
+                    updateServiceRecords(service);
+                }
+                FreeMem(state, sizeof(struct ServiceState));
+            } else {
+                /* Send next announcement */
+                struct DNSMessage msg;
+                UBYTE buffer[512];
+                LONG len;
+                
+                memset(&msg, 0, sizeof(msg));
+                msg.id = GetSysTime() & 0xFFFF;
+                msg.flags = DNS_FLAG_QR_RESPONSE | DNS_FLAG_AA;
+                msg.numAnswers = 1;
+                
+                struct DNSRecord *a = &msg.answers[0];
+                strncpy(a->name, state->service.name, sizeof(a->name) - 1);
+                a->type = DNS_TYPE_PTR;
+                a->class = DNS_CLASS_IN;
+                a->ttl = MDNS_TTL;
+                strncpy(a->data.ptr.name, state->service.type, sizeof(a->data.ptr.name) - 1);
+                
+                len = dnsEncodeMessage(&msg, buffer, sizeof(buffer));
+                if (len > 0) {
+                    sendMulticast(iface->addr, buffer, len);
+                }
+                
+                state->nextTime = now + ANNOUNCE_WAIT;
+            }
+        }
+    }
 }
 
 /* Main function */
