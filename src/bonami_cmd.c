@@ -9,7 +9,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#include "../include/bonami.h"
+#include "bonami.h"
 
 /* Command structure */
 struct Command {
@@ -90,6 +90,7 @@ int main(int argc, char **argv)
     struct Library *bonami;
     struct Command *cmd;
     struct RDArgs *args;
+    LONG result = RETURN_ERROR;
     
     /* Check arguments */
     if (argc < 2) {
@@ -120,18 +121,20 @@ int main(int argc, char **argv)
             }
             
             /* Execute command */
-            LONG result = cmd->handler(args);
+            result = cmd->handler(args);
             FreeArgs(args);
-            CloseLibrary(bonami);
-            return result;
+            break;
         }
     }
     
     /* Unknown command */
-    printf("Error: Unknown command '%s'\n", argv[1]);
-    print_help();
+    if (!cmd->name) {
+        printf("Error: Unknown command '%s'\n", argv[1]);
+        print_help();
+    }
+    
     CloseLibrary(bonami);
-    return RETURN_ERROR;
+    return result;
 }
 
 /* Discover command */
