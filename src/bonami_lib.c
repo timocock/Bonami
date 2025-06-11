@@ -88,20 +88,11 @@ struct BAMessage {
 /* Library base structure */
 struct BABase {
     struct Library lib;
-    struct SignalSemaphore lock;
-    struct SignalSemaphore msgLock;  /* For message handling */
     struct MsgPort *replyPort;
-    struct Task *mainTask;
-    struct List monitors;
-    struct List updateCallbacks;
-    struct BAConfig config;
-    ULONG flags;
-    ULONG openCount;  /* Library open count */
-    APTR memPool;     /* Memory pool for allocations */
+    struct MsgPort *daemonPort;
     #ifdef __amigaos4__
     struct ExecIFace *IExec;
     struct DOSIFace *IDOS;
-    struct RoadshowIFace *IRoadshow;
     #endif
 };
 
@@ -111,6 +102,7 @@ static LONG waitForReply(struct BABase *base, struct BAMessage *msg);
 static void monitorTask(void *arg);
 static BOOL matchFilter(struct BAService *service, struct BAFilter *filter);
 static LONG validateServiceType(const char *type);
+static LONG validateServiceName(const char *name);
 
 /**
  * OpenLibrary - Initialize and open the BonAmi library
@@ -131,9 +123,7 @@ struct Library *OpenLibrary(void)
     lib = FindLibrary("bonami.library");
     if (lib) {
         base = (struct BABase *)lib;
-        ObtainSemaphore(&base->lock);
-        base->openCount++;
-        ReleaseSemaphore(&base->lock);
+        base->lib.lib_OpenCnt++;
         return lib;
     }
     
@@ -150,42 +140,19 @@ struct Library *OpenLibrary(void)
     base->lib.lib_Version = LIB_VERSION;
     base->lib.lib_Revision = LIB_REVISION;
     base->lib.lib_IdString = LIB_IDSTRING;
-    
-    /* Initialize semaphores */
-    InitSemaphore(&base->lock);
-    InitSemaphore(&base->msgLock);
-    
-    /* Initialize lists */
-    NewList(&base->monitors);
-    NewList(&base->updateCallbacks);
-    
-    /* Create memory pool */
-    base->memPool = CreatePool(MEMF_ANY, POOL_PUDDLE_SIZE, POOL_THRESHOLD);
-    if (!base->memPool) {
-        FreeVec(base);
-        return NULL;
-    }
-    
-    /* Initialize config */
-    memset(&base->config, 0, sizeof(struct BAConfig));
-    base->config.discoveryTimeout = 5;
-    base->config.resolveTimeout = 2;
-    base->config.ttl = 120;
-    base->config.autoReconnect = TRUE;
+    base->lib.lib_OpenCnt = 1;
     
     /* Create reply port */
     base->replyPort = CreateMsgPort();
     if (!base->replyPort) {
-        DeletePool(base->memPool);
         FreeVec(base);
         return NULL;
     }
     
     /* Find daemon port */
-    base->mainTask = FindTask(NULL);
-    if (!base->mainTask) {
+    base->daemonPort = FindPort("bonamid");
+    if (!base->daemonPort) {
         DeleteMsgPort(base->replyPort);
-        DeletePool(base->memPool);
         FreeVec(base);
         return NULL;
     }
@@ -195,7 +162,6 @@ struct Library *OpenLibrary(void)
     struct Library *execBase = OpenLibrary("exec.library", 40);
     if (!execBase) {
         DeleteMsgPort(base->replyPort);
-        DeletePool(base->memPool);
         FreeVec(base);
         return NULL;
     }
@@ -204,7 +170,6 @@ struct Library *OpenLibrary(void)
     if (!base->IExec) {
         CloseLibrary(execBase);
         DeleteMsgPort(base->replyPort);
-        DeletePool(base->memPool);
         FreeVec(base);
         return NULL;
     }
@@ -214,7 +179,6 @@ struct Library *OpenLibrary(void)
         DropInterface((struct Interface *)base->IExec);
         CloseLibrary(execBase);
         DeleteMsgPort(base->replyPort);
-        DeletePool(base->memPool);
         FreeVec(base);
         return NULL;
     }
@@ -225,39 +189,10 @@ struct Library *OpenLibrary(void)
         DropInterface((struct Interface *)base->IExec);
         CloseLibrary(execBase);
         DeleteMsgPort(base->replyPort);
-        DeletePool(base->memPool);
-        FreeVec(base);
-        return NULL;
-    }
-    
-    struct Library *roadshowBase = OpenLibrary("roadshow.library", 40);
-    if (!roadshowBase) {
-        DropInterface((struct Interface *)base->IDOS);
-        CloseLibrary(dosBase);
-        DropInterface((struct Interface *)base->IExec);
-        CloseLibrary(execBase);
-        DeleteMsgPort(base->replyPort);
-        DeletePool(base->memPool);
-        FreeVec(base);
-        return NULL;
-    }
-    
-    base->IRoadshow = (struct RoadshowIFace *)GetInterface(roadshowBase, "main", 1, NULL);
-    if (!base->IRoadshow) {
-        CloseLibrary(roadshowBase);
-        DropInterface((struct Interface *)base->IDOS);
-        CloseLibrary(dosBase);
-        DropInterface((struct Interface *)base->IExec);
-        CloseLibrary(execBase);
-        DeleteMsgPort(base->replyPort);
-        DeletePool(base->memPool);
         FreeVec(base);
         return NULL;
     }
     #endif
-    
-    /* Set initial open count */
-    base->openCount = 1;
     
     /* Add to system */
     AddLibrary((struct Library *)base);
@@ -279,31 +214,12 @@ void CloseLibrary(void)
     if (!base) return;
     
     /* Decrement open count */
-    ObtainSemaphore(&base->lock);
-    if (--base->openCount > 0) {
-        ReleaseSemaphore(&base->lock);
+    if (--base->lib.lib_OpenCnt > 0) {
         return;
     }
-    ReleaseSemaphore(&base->lock);
     
     /* Remove from system */
     RemLibrary((struct Library *)base);
-    
-    /* Free monitors */
-    ObtainSemaphore(&base->lock);
-    while (!IsListEmpty(&base->monitors)) {
-        struct BAMonitor *monitor = (struct BAMonitor *)RemHead(&base->monitors);
-        FreePooled(base, monitor, sizeof(struct BAMonitor));
-    }
-    ReleaseSemaphore(&base->lock);
-    
-    /* Free update callbacks */
-    ObtainSemaphore(&base->lock);
-    while (!IsListEmpty(&base->updateCallbacks)) {
-        struct BAUpdateCallback *cb = (struct BAUpdateCallback *)RemHead(&base->updateCallbacks);
-        FreePooled(base, cb, sizeof(struct BAUpdateCallback));
-    }
-    ReleaseSemaphore(&base->lock);
     
     if (base->replyPort) {
         DeleteMsgPort(base->replyPort);
@@ -311,30 +227,18 @@ void CloseLibrary(void)
     
     #ifdef __amigaos4__
     /* Drop interfaces */
-    if (base->IRoadshow) {
-        struct Library *roadshowBase = base->IRoadshow->Data.LibBase;
-        DropInterface((struct Interface *)base->IRoadshow);
-        CloseLibrary(roadshowBase);
-        base->IRoadshow = NULL;
-    }
-    
     if (base->IDOS) {
         struct Library *dosBase = base->IDOS->Data.LibBase;
         DropInterface((struct Interface *)base->IDOS);
         CloseLibrary(dosBase);
-        base->IDOS = NULL;
     }
     
     if (base->IExec) {
         struct Library *execBase = base->IExec->Data.LibBase;
         DropInterface((struct Interface *)base->IExec);
         CloseLibrary(execBase);
-        base->IExec = NULL;
     }
     #endif
-    
-    /* Delete memory pool */
-    DeletePool(base->memPool);
     
     FreeVec(base);
 }
@@ -376,20 +280,21 @@ LONG BARegisterService(struct BAService *service)
         return result;
     }
     
-    /* Obtain semaphore */
-    ObtainSemaphore(&base->lock);
+    /* Validate service name */
+    result = validateServiceName(service->name);
+    if (result != BA_OK) {
+        return result;
+    }
     
-    /* Allocate message from pool */
-    msg = AllocPooled(base, sizeof(struct BAMessage));
+    /* Allocate message */
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
     if (!msg) {
-        ReleaseSemaphore(&base->lock);
         return BA_NOMEM;
     }
     
     /* Set up message */
     msg->type = MSG_REGISTER;
     memcpy(&msg->data.register_msg.service, service, sizeof(struct BAService));
-    msg->data.register_msg.result = BA_OK;
     
     /* Send to daemon */
     result = sendMessage(base, msg);
@@ -400,11 +305,7 @@ LONG BARegisterService(struct BAService *service)
         }
     }
     
-    FreePooled(base, msg, sizeof(struct BAMessage));
-    
-    /* Release semaphore */
-    ReleaseSemaphore(&base->lock);
-    
+    FreeVec(msg);
     return result;
 }
 
@@ -421,13 +322,14 @@ LONG BAUnregisterService(const char *name, const char *type)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
     struct BAMessage *msg;
+    LONG result;
     
     if (!name || !type) {
         return BA_BADPARAM;
     }
     
     /* Allocate message */
-    msg = AllocPooled(base, sizeof(struct BAMessage));
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
     if (!msg) {
         return BA_NOMEM;
     }
@@ -436,10 +338,9 @@ LONG BAUnregisterService(const char *name, const char *type)
     msg->type = MSG_UNREGISTER;
     strncpy(msg->data.unregister_msg.name, name, sizeof(msg->data.unregister_msg.name) - 1);
     strncpy(msg->data.unregister_msg.type, type, sizeof(msg->data.unregister_msg.type) - 1);
-    msg->data.unregister_msg.result = BA_OK;
     
     /* Send to daemon */
-    LONG result = sendMessage(base, msg);
+    result = sendMessage(base, msg);
     if (result == BA_OK) {
         result = waitForReply(base, msg);
         if (result == BA_OK) {
@@ -447,8 +348,7 @@ LONG BAUnregisterService(const char *name, const char *type)
         }
     }
     
-    FreePooled(base, msg, sizeof(struct BAMessage));
-    
+    FreeVec(msg);
     return result;
 }
 
@@ -466,13 +366,20 @@ LONG BAStartDiscovery(struct BADiscovery *discovery)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
     struct BAMessage *msg;
+    LONG result;
     
     if (!discovery || !discovery->type[0]) {
         return BA_BADPARAM;
     }
     
+    /* Validate service type */
+    result = validateServiceType(discovery->type);
+    if (result != BA_OK) {
+        return result;
+    }
+    
     /* Allocate message */
-    msg = AllocPooled(base, sizeof(struct BAMessage));
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
     if (!msg) {
         return BA_NOMEM;
     }
@@ -481,10 +388,9 @@ LONG BAStartDiscovery(struct BADiscovery *discovery)
     msg->type = MSG_DISCOVER;
     strncpy(msg->data.discover_msg.type, discovery->type, sizeof(msg->data.discover_msg.type) - 1);
     msg->data.discover_msg.services = discovery->services;
-    msg->data.discover_msg.result = BA_OK;
     
     /* Send to daemon */
-    LONG result = sendMessage(base, msg);
+    result = sendMessage(base, msg);
     if (result == BA_OK) {
         result = waitForReply(base, msg);
         if (result == BA_OK) {
@@ -492,7 +398,7 @@ LONG BAStartDiscovery(struct BADiscovery *discovery)
         }
     }
     
-    FreePooled(base, msg, sizeof(struct BAMessage));
+    FreeVec(msg);
     return result;
 }
 
@@ -508,13 +414,14 @@ LONG BAStopDiscovery(struct BADiscovery *discovery)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
     struct BAMessage *msg;
+    LONG result;
     
     if (!discovery || !discovery->type[0]) {
         return BA_BADPARAM;
     }
     
     /* Allocate message */
-    msg = AllocPooled(base, sizeof(struct BAMessage));
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
     if (!msg) {
         return BA_NOMEM;
     }
@@ -522,10 +429,9 @@ LONG BAStopDiscovery(struct BADiscovery *discovery)
     /* Set up message */
     msg->type = MSG_STOP;
     strncpy(msg->data.discover_msg.type, discovery->type, sizeof(msg->data.discover_msg.type) - 1);
-    msg->data.discover_msg.result = BA_OK;
     
     /* Send to daemon */
-    LONG result = sendMessage(base, msg);
+    result = sendMessage(base, msg);
     if (result == BA_OK) {
         result = waitForReply(base, msg);
         if (result == BA_OK) {
@@ -533,7 +439,7 @@ LONG BAStopDiscovery(struct BADiscovery *discovery)
         }
     }
     
-    FreePooled(base, msg, sizeof(struct BAMessage));
+    FreeVec(msg);
     return result;
 }
 
@@ -711,19 +617,10 @@ static LONG sendMessage(struct BABase *base, struct BAMessage *msg)
 {
     if (!base || !msg) return BA_BADPARAM;
     
-    ObtainSemaphore(&base->msgLock);
-    
-    if (!base->mainTask || !base->replyPort) {
-        ReleaseSemaphore(&base->msgLock);
-        return BA_NOTREADY;
-    }
-    
     msg->msg.mn_ReplyPort = base->replyPort;
     msg->msg.mn_Length = sizeof(struct BAMessage);
     
-    PutMsg(base->mainTask, (struct Message *)msg);
-    
-    ReleaseSemaphore(&base->msgLock);
+    PutMsg(base->daemonPort, (struct Message *)msg);
     return BA_OK;
 }
 
@@ -732,17 +629,9 @@ static LONG waitForReply(struct BABase *base, struct BAMessage *msg)
 {
     if (!base || !msg) return BA_BADPARAM;
     
-    ObtainSemaphore(&base->msgLock);
-    
-    if (!base->replyPort) {
-        ReleaseSemaphore(&base->msgLock);
-        return BA_NOTREADY;
-    }
-    
     WaitPort(base->replyPort);
     GetMsg(base->replyPort);
     
-    ReleaseSemaphore(&base->msgLock);
     return BA_OK;
 }
 
@@ -1082,11 +971,6 @@ LONG BAUnregisterUpdateCallback(const char *name,
 /* Validate service type */
 static LONG validateServiceType(const char *type)
 {
-    const char *p;
-    BOOL hasService = FALSE;
-    BOOL hasProtocol = FALSE;
-    BOOL hasLocal = FALSE;
-    
     if (!type || !type[0]) {
         return BA_BADTYPE;
     }
@@ -1096,40 +980,34 @@ static LONG validateServiceType(const char *type)
         return BA_BADTYPE;
     }
     
-    /* Parse service type */
-    p = type + 1;  /* Skip leading underscore */
-    
-    /* Service name */
-    while (*p && *p != '_') {
-        if (!isalnum(*p) && *p != '-') {
-            return BA_BADTYPE;
-        }
-        hasService = TRUE;
-        p++;
-    }
-    
-    if (!hasService) {
-        return BA_BADTYPE;
-    }
-    
-    /* Check for protocol separator */
-    if (*p != '_') {
-        return BA_BADTYPE;
-    }
-    p++;
-    
-    /* Protocol */
-    if (strncmp(p, "tcp", 3) != 0 && strncmp(p, "udp", 3) != 0) {
-        return BA_BADTYPE;
-    }
-    hasProtocol = TRUE;
-    p += 3;
-    
     /* Check for .local suffix */
-    if (strcmp(p, ".local") != 0) {
+    const char *p = strstr(type, ".local");
+    if (!p || p[6] != '\0') {
         return BA_BADTYPE;
     }
-    hasLocal = TRUE;
+    
+    return BA_OK;
+}
+
+/* Validate service name */
+static LONG validateServiceName(const char *name)
+{
+    if (!name || !name[0]) {
+        return BA_BADNAME;
+    }
+    
+    /* Check length */
+    if (strlen(name) > 63) {
+        return BA_BADNAME;
+    }
+    
+    /* Check characters */
+    const char *p;
+    for (p = name; *p; p++) {
+        if (!isalnum(*p) && *p != '-' && *p != '_' && *p != '.') {
+            return BA_BADNAME;
+        }
+    }
     
     return BA_OK;
 }
