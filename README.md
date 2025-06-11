@@ -144,14 +144,17 @@ Performs arbitrary DNS queries.
 
 2. **Installation Steps**
    ```bash
+   # Create configuration directory
+   makedir SYS:Utilities/BonAmi
+   
    # Copy the daemon
-   copy SYS:Utilities/BonAmi/bonamid TO SYS:Utilities/BonAmi/
+   copy SYS:Utilities/BonAmi/bonamid TO SYS:Utilities/
    
    # Copy the library
    copy SYS:Libs/bonami.library TO SYS:Libs/
    
    # Copy the command-line tool
-   copy SYS:Utilities/BonAmi/bactl TO SYS:Utilities/BonAmi/
+   copy SYS:Utilities/BonAmi/bactl TO C:
    
    # Add to Startup-Sequence
    copy S/BonAmi-Startup TO S:Startup-Sequence
@@ -160,7 +163,8 @@ Performs arbitrary DNS queries.
 3. **Configuration**
    - Edit S:BonAmi-Startup to customize startup options
    - Set environment variables for debugging if needed
-   - Configure log level in ENV:Bonami/config
+   - Configure log level in SYS:Utilities/BonAmi/config
+   - Logs are stored in SYS:Utilities/BonAmi/logs
 
 ## Building
 
