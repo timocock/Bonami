@@ -11,8 +11,8 @@ OBJ_DIR = obj
 BIN_DIR = bin
 
 # Source files
-SRCS = $(SRC_DIR)/bonamid.c
-OBJS = $(SRC_DIR)/bonamid.o
+SRCS = $(SRC_DIR)/bonamid.c $(SRC_DIR)/dns.c
+OBJS = $(SRC_DIR)/bonamid.o $(SRC_DIR)/dns.o
 
 # Default target
 all: $(BIN_DIR)/bonamid
