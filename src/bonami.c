@@ -49,12 +49,13 @@ static const char version[] = "$VER: bonamid 1.0 (01.01.2024)";
 #define MSG_REGISTER    1
 #define MSG_UNREGISTER  2
 #define MSG_DISCOVER    3
-#define MSG_RESOLVE     4
-#define MSG_QUERY       5
+#define MSG_STOP        4
+#define MSG_RESOLVE     5
 #define MSG_UPDATE      6
 #define MSG_SHUTDOWN    7
 #define MSG_MONITOR     8
 #define MSG_CONFIG      9
+#define MSG_ENUMERATE   10
 
 /* Interface state */
 struct InterfaceState {
@@ -1147,39 +1148,43 @@ static void discoveryTask(void)
 static LONG createMulticastSocket(void)
 {
     struct sockaddr_in addr;
+    struct ip_mreq mreq;
     LONG sock;
     
     /* Create socket */
     sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
-        return BA_ERROR;
+        logMessage(LOG_ERROR, "Failed to create socket: %s", strerror(errno));
+        return BA_NETWORK;
     }
     
     /* Set socket options */
     if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0) {
+        logMessage(LOG_ERROR, "Failed to set SO_REUSEADDR: %s", strerror(errno));
         close(sock);
-        return BA_ERROR;
+        return BA_NETWORK;
     }
     
-    /* Bind to multicast address */
+    /* Bind to port */
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr("224.0.0.251");
-    addr.sin_port = htons(5353);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(MDNS_PORT);
     
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        logMessage(LOG_ERROR, "Failed to bind socket: %s", strerror(errno));
         close(sock);
-        return BA_ERROR;
+        return BA_NETWORK;
     }
     
     /* Join multicast group */
-    struct ip_mreq mreq;
-    mreq.imr_multiaddr.s_addr = inet_addr("224.0.0.251");
+    mreq.imr_multiaddr.s_addr = inet_addr(MDNS_MULTICAST_ADDR);
     mreq.imr_interface.s_addr = htonl(INADDR_ANY);
     
     if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+        logMessage(LOG_ERROR, "Failed to join multicast group: %s", strerror(errno));
         close(sock);
-        return BA_ERROR;
+        return BA_NETWORK;
     }
     
     return sock;
@@ -1206,17 +1211,42 @@ static LONG checkNetworkStatus(void)
 static void updateServiceRecords(struct BAServiceNode *service)
 {
     struct InterfaceState *iface;
+    struct DNSRecord *record;
     LONG i;
     
-    /* Update on all interfaces */
+    /* Update records on all interfaces */
     for (i = 0; i < bonami.numInterfaces; i++) {
         iface = &bonami.interfaces[i];
-        if (iface->active) {
-            /* Remove old records */
-            removeServiceRecords(service);
-            
-            /* Add new records */
-            startServiceProbing(iface, &service->service);
+        if (!iface->active) {
+            continue;
+        }
+        
+        /* Remove old records */
+        for (record = (struct DNSRecord *)iface->records->lh_Head;
+             record->node.ln_Succ;
+             record = (struct DNSRecord *)record->node.ln_Succ) {
+            if (strcmp(record->name, service->service.name) == 0) {
+                removeRecord(iface, record->name, record->type);
+            }
+        }
+        
+        /* Add new records */
+        record = createPTRRecord(service->service.type, service->service.name);
+        if (record) {
+            addRecord(iface, record);
+            scheduleAnnouncement(iface, record);
+        }
+        
+        record = createSRVRecord(service->service.name, service->service.port, bonami.hostname);
+        if (record) {
+            addRecord(iface, record);
+            scheduleAnnouncement(iface, record);
+        }
+        
+        record = createTXTRecord(service->service.name, service->service.txt);
+        if (record) {
+            addRecord(iface, record);
+            scheduleAnnouncement(iface, record);
         }
     }
 }
@@ -1654,7 +1684,7 @@ static void requeueQuery(struct InterfaceState *iface, struct DNSQuery *query)
     AddTail(iface->questions, (struct Node *)query);
 }
 
-/* Send query on interface */
+/* Send query */
 static LONG sendQuery(struct InterfaceState *iface, struct DNSQuery *query)
 {
     struct sockaddr_in addr;
@@ -1675,14 +1705,15 @@ static LONG sendQuery(struct InterfaceState *iface, struct DNSQuery *query)
     /* Initialize address */
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr("224.0.0.251");
-    addr.sin_port = htons(5353);
+    addr.sin_addr.s_addr = inet_addr(MDNS_MULTICAST_ADDR);
+    addr.sin_port = htons(MDNS_PORT);
     
     /* Send message */
     result = sendto(iface->socket, &msg, sizeof(msg), 0,
                    (struct sockaddr *)&addr, sizeof(addr));
     if (result < 0) {
-        return BA_ERROR;
+        logMessage(LOG_ERROR, "Failed to send query: %s", strerror(errno));
+        return BA_NETWORK;
     }
     
     return BA_OK;

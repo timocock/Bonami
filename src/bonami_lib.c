@@ -27,6 +27,7 @@
 #define MSG_RESOLVE    6
 #define MSG_MONITOR    7
 #define MSG_CONFIG     8
+#define MSG_ENUMERATE  9
 
 /* Message structure for daemon communication */
 struct BAMessage {
@@ -71,6 +72,10 @@ struct BAMessage {
             struct BATXTRecord *txt;
             LONG result;
         } update_msg;
+        struct {
+            struct List *types;
+            LONG result;
+        } enumerate_msg;
     } data;
 };
 
@@ -803,6 +808,49 @@ static LONG validateServiceType(const char *type)
         return BA_BADTYPE;
     }
     hasLocal = TRUE;
+    
+    return BA_OK;
+}
+
+/* Enumerate all service types currently advertised */
+LONG BAEnumerateServiceTypes(struct List *types)
+{
+    struct BABase *base = (struct BABase *)SysBase->LibNode;
+    struct BAMessage msg;
+    LONG result;
+    
+    /* Initialize message */
+    memset(&msg, 0, sizeof(msg));
+    msg.type = MSG_ENUMERATE;
+    
+    /* Send message */
+    result = sendMessage(base, &msg);
+    if (result != BA_OK) {
+        return result;
+    }
+    
+    /* Wait for reply */
+    result = waitForReply(base, &msg);
+    if (result != BA_OK) {
+        return result;
+    }
+    
+    /* Check result */
+    if (msg.data.enumerate_msg.result != BA_OK) {
+        return msg.data.enumerate_msg.result;
+    }
+    
+    /* Copy types to list */
+    NewList(types);
+    for (const char **type = msg.data.enumerate_msg.types; *type; type++) {
+        struct Node *node = AllocMem(sizeof(struct Node), MEMF_CLEAR);
+        if (!node) {
+            return BA_NOMEM;
+        }
+        
+        node->ln_Name = (char *)*type;
+        AddTail(types, node);
+    }
     
     return BA_OK;
 } 
