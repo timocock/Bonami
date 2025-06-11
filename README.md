@@ -6,19 +6,25 @@ BonAmi is an mDNS (multicast DNS) implementation for AmigaOS, designed to work w
 
 ### Core Components
 
-1. **mDNS Daemon (bonamid)**
+1. **mDNS Daemon (bonami)**
    - Runs as a background process
    - Handles multicast DNS queries and responses
    - Manages service registration and discovery
    - Uses Roadshow's bsdsocket.library for network communication
    - Implements RFC 6762 (mDNS) and RFC 6763 (DNS-SD)
+   - Monitors network interface status
+   - Implements service conflict resolution
+   - Manages DNS record caching
+   - Handles TTL management
+   - Supports multiple network interfaces
 
 2. **Library Interface (bonami.library)**
    - Provides API for applications to register and discover services
-   - Handles communication with the daemon
+   - Handles communication with the daemon via message passing
    - Implements the mDNS protocol according to RFC 6762
    - Supports both synchronous and asynchronous operations
    - Provides callback mechanism for service discovery
+   - Manages service state and updates
 
 3. **Command Line Tools**
    - `bonami-register`: Register services
@@ -42,6 +48,7 @@ BonAmi is an mDNS (multicast DNS) implementation for AmigaOS, designed to work w
    - Multicast address: 224.0.0.251
    - TTL: 255 (local network only)
    - Implements proper multicast group management
+   - Handles network interface changes
 
 2. **Service Discovery**
    - Implements DNS-SD (DNS Service Discovery)
@@ -49,6 +56,8 @@ BonAmi is an mDNS (multicast DNS) implementation for AmigaOS, designed to work w
    - Handles service instance resolution
    - Implements service browsing and querying
    - Supports service registration and unregistration
+   - Implements service conflict resolution
+   - Handles service state management
 
 3. **Resource Records**
    - A Records (IPv4 addresses)
@@ -57,6 +66,7 @@ BonAmi is an mDNS (multicast DNS) implementation for AmigaOS, designed to work w
    - TXT Records (service metadata)
    - Implements proper TTL management
    - Handles record conflicts
+   - Implements DNS record caching
 
 ### Memory Management
 
@@ -66,6 +76,7 @@ BonAmi is an mDNS (multicast DNS) implementation for AmigaOS, designed to work w
 - Efficient string handling for DNS names
 - Proper cleanup of resources
 - Memory pool for service records
+- Cache management for DNS records
 
 ### Error Handling
 
@@ -74,6 +85,8 @@ BonAmi is an mDNS (multicast DNS) implementation for AmigaOS, designed to work w
 - Clear error reporting to applications
 - Proper error codes and messages
 - Debug logging support
+- Service conflict handling
+- Network state management
 
 ## Library Interface
 
@@ -84,10 +97,9 @@ LONG BonamiRegisterService(struct BonamiService *service);
 ```
 Registers a service for advertisement on the local network. The service structure contains:
 - name: Service instance name
-- type: Service type (e.g., "_http._tcp")
+- type: Service type (e.g., "_http._tcp.local")
 - port: Service port number
 - txt: TXT record data
-- ttl: Time to live in seconds
 
 ### Service Discovery
 
@@ -96,22 +108,29 @@ LONG BonamiStartDiscovery(struct BonamiDiscovery *discovery);
 ```
 Starts discovering services of a specific type. The discovery structure contains:
 - type: Service type to discover
-- services: List of discovered services
-- lock: Semaphore for thread safety
+- callback: Function to call when services are found
+- userData: User data passed to callback
 
-### Service Information
-
-```c
-LONG BonamiGetServiceInfo(struct BonamiServiceInfo *info, const char *name, const char *type);
-```
-Retrieves detailed information about a specific service.
-
-### Service Enumeration
+### Service Resolution
 
 ```c
-LONG BonamiEnumerateServices(struct List *services, const char *type);
+LONG BonamiResolveService(const char *name, const char *type, struct BonamiService *service);
 ```
-Lists all services of a specific type currently available on the network.
+Resolves a specific service instance to get its details.
+
+### Service Type Enumeration
+
+```c
+LONG BonamiEnumerateServiceTypes(struct BonamiServiceType *types, LONG maxTypes);
+```
+Lists all service types currently available on the network.
+
+### DNS Queries
+
+```c
+LONG BonamiQueryDNS(const char *name, WORD type, WORD class, struct DNSRecord *records, LONG maxRecords);
+```
+Performs arbitrary DNS queries.
 
 ## Installation
 
@@ -124,7 +143,7 @@ Lists all services of a specific type currently available on the network.
 2. **Installation Steps**
    ```bash
    # Copy the daemon
-   copy SYS:Utilities/BonAmi/bonamid TO SYS:Utilities/BonAmi/
+   copy SYS:Utilities/BonAmi/bonami TO SYS:Utilities/BonAmi/
    
    # Copy the library
    copy SYS:Libs/bonami.library TO SYS:Libs/
@@ -139,6 +158,7 @@ Lists all services of a specific type currently available on the network.
 3. **Configuration**
    - Edit S:BonAmi-Startup to customize startup options
    - Set environment variables for debugging if needed
+   - Configure log level in ENV:Bonami/config
 
 ## Building
 
@@ -159,10 +179,11 @@ make
 ## Debugging
 
 BonAmi supports several debugging options:
-- Set BONAMI_DEBUG=1 for basic debug output
-- Set BONAMI_DEBUG=2 for detailed protocol debugging
+- Set log level in ENV:Bonami/config (0-2)
 - Use bonami-register -v for verbose output
 - Check SYS:Logs/BonAmi.log for daemon logs
+- Monitor network interface status
+- Check service conflict resolution
 
 ## License
 
