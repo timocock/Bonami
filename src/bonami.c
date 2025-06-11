@@ -100,6 +100,16 @@ struct {
     BOOL networkReady;
 } bonami;
 
+/* DNS query structure */
+struct DNSQuery {
+    char name[256];
+    WORD type;
+    WORD class;
+    struct DNSRecord *result;
+    ULONG resultLen;
+    struct sockaddr_in from;
+};
+
 /* Function prototypes */
 static void initDaemon(void);
 static void cleanupDaemon(void);
@@ -115,6 +125,9 @@ static void processResponse(const UBYTE *data, LONG len, struct sockaddr_in *fro
 static void sendMulticast(LONG sock, const UBYTE *data, LONG len);
 static void updateServiceRecords(struct BonamiServiceNode *service);
 static void removeServiceRecords(struct BonamiServiceNode *service);
+static LONG processDNSQuery(struct DNSQuery *query);
+static LONG validateServiceName(const char *name);
+static LONG validateServiceType(const char *type);
 
 /* Initialize daemon */
 static void initDaemon(void)
@@ -179,6 +192,7 @@ static void cleanupDaemon(void)
 static void networkMonitorTask(void)
 {
     LONG lastStatus = -1;
+    LONG retryCount = 0;
     
     while (bonami.running) {
         LONG status = checkNetworkStatus();
@@ -189,14 +203,25 @@ static void networkMonitorTask(void)
             if (status) {
                 /* Network is up */
                 if (!bonami.networkReady) {
-                    bonami.networkReady = TRUE;
-                    /* TODO: Start mDNS services */
+                    /* Try to create multicast socket */
+                    LONG sock = createMulticastSocket();
+                    if (sock >= 0) {
+                        CloseSocket(sock);
+                        bonami.networkReady = TRUE;
+                        retryCount = 0;
+                    } else {
+                        /* Network might not be fully ready */
+                        if (++retryCount >= 5) {  /* Try 5 times */
+                            bonami.networkReady = TRUE;
+                            retryCount = 0;
+                        }
+                    }
                 }
             } else {
                 /* Network is down */
                 if (bonami.networkReady) {
                     bonami.networkReady = FALSE;
-                    /* TODO: Stop mDNS services */
+                    retryCount = 0;
                 }
             }
             
@@ -246,6 +271,7 @@ static void processMessage(struct BonamiMessage *msg)
     struct BonamiMessage *reply;
     struct BonamiServiceNode *service;
     struct BonamiDiscoveryNode *discovery;
+    LONG result;
     
     /* Allocate reply message */
     reply = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
@@ -261,6 +287,24 @@ static void processMessage(struct BonamiMessage *msg)
     /* Process message */
     switch (msg->type) {
         case BONAMI_MSG_REGISTER:
+            /* Validate parameters */
+            result = validateServiceName(msg->data.register_msg.service.name);
+            if (result != BONAMI_OK) {
+                reply->type = result;
+                break;
+            }
+            
+            result = validateServiceType(msg->data.register_msg.service.type);
+            if (result != BONAMI_OK) {
+                reply->type = result;
+                break;
+            }
+            
+            if (msg->data.register_msg.service.port == 0) {
+                reply->type = BONAMI_BADPORT;
+                break;
+            }
+            
             ObtainSemaphore(&bonami.lock);
             
             /* Check if service exists */
@@ -358,9 +402,9 @@ static void processMessage(struct BonamiMessage *msg)
             break;
             
         case BONAMI_MSG_QUERY:
-            processQuery(msg->data.query_msg.result, msg->data.query_msg.resultLen, 
-                         (struct sockaddr_in *)&msg->data.query_msg.from);
-            reply->type = BONAMI_OK;
+            /* Process DNS query */
+            result = processDNSQuery(&msg->data.query_msg);
+            reply->type = result;
             break;
             
         case BONAMI_MSG_UPDATE:
@@ -769,6 +813,136 @@ static struct BonamiDiscoveryNode *findDiscovery(const char *type)
     }
     
     return NULL;
+}
+
+/* Process DNS query */
+static LONG processDNSQuery(struct DNSQuery *query)
+{
+    struct DNSMessage msg;
+    UBYTE buffer[512];
+    LONG len;
+    LONG sock;
+    
+    /* Create socket */
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        return BONAMI_NETWORK;
+    }
+    
+    /* Create query message */
+    memset(&msg, 0, sizeof(msg));
+    msg.id = GetSysTime() & 0xFFFF;  /* Use system time as ID */
+    msg.flags = DNS_FLAG_RD;         /* Request recursion */
+    msg.numQuestions = 1;
+    
+    /* Set up question */
+    struct DNSQuestion *q = &msg.questions[0];
+    strncpy(q->name, query->name, sizeof(q->name) - 1);
+    q->type = query->type;
+    q->class = query->class;
+    
+    /* Encode message */
+    len = dnsEncodeMessage(&msg, buffer, sizeof(buffer));
+    if (len <= 0) {
+        CloseSocket(sock);
+        return BONAMI_BADQUERY;
+    }
+    
+    /* Send query */
+    if (sendto(sock, buffer, len, 0, (struct sockaddr *)&query->from, 
+               sizeof(query->from)) < 0) {
+        CloseSocket(sock);
+        return BONAMI_NETWORK;
+    }
+    
+    /* Set receive timeout */
+    struct timeval tv;
+    tv.tv_sec = 5;  /* 5 second timeout */
+    tv.tv_usec = 0;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        CloseSocket(sock);
+        return BONAMI_ERROR;
+    }
+    
+    /* Receive response */
+    len = recvfrom(sock, buffer, sizeof(buffer), 0, NULL, NULL);
+    if (len <= 0) {
+        CloseSocket(sock);
+        return BONAMI_TIMEOUT;
+    }
+    
+    /* Parse response */
+    if (dnsParseMessage(buffer, len, &msg) != 0) {
+        CloseSocket(sock);
+        return BONAMI_BADRESPONSE;
+    }
+    
+    /* Process answers */
+    if (msg.numAnswers > 0) {
+        /* Allocate result buffer */
+        query->result = AllocMem(msg.numAnswers * sizeof(struct DNSRecord), 
+                                MEMF_CLEAR);
+        if (!query->result) {
+            CloseSocket(sock);
+            return BONAMI_NOMEM;
+        }
+        
+        /* Copy answers */
+        for (ULONG i = 0; i < msg.numAnswers; i++) {
+            memcpy(&query->result[i], &msg.answers[i], sizeof(struct DNSRecord));
+        }
+        query->resultLen = msg.numAnswers;
+    }
+    
+    CloseSocket(sock);
+    return BONAMI_OK;
+}
+
+/* Validate service name */
+static LONG validateServiceName(const char *name)
+{
+    if (!name || !name[0]) {
+        return BONAMI_BADNAME;
+    }
+    
+    /* Check length */
+    if (strlen(name) > 63) {  /* DNS name length limit */
+        return BONAMI_BADNAME;
+    }
+    
+    /* Check for invalid characters */
+    for (const char *p = name; *p; p++) {
+        if (!isalnum(*p) && *p != '-' && *p != '_' && *p != '.') {
+            return BONAMI_BADNAME;
+        }
+    }
+    
+    return BONAMI_OK;
+}
+
+/* Validate service type */
+static LONG validateServiceType(const char *type)
+{
+    if (!type || !type[0]) {
+        return BONAMI_BADTYPE;
+    }
+    
+    /* Check format: _service._tcp.local */
+    if (type[0] != '_') {
+        return BONAMI_BADTYPE;
+    }
+    
+    const char *tcp = strstr(type, "._tcp.local");
+    if (!tcp) {
+        return BONAMI_BADTYPE;
+    }
+    
+    /* Check service name length */
+    if (tcp - type > 15) {  /* Service name length limit */
+        return BONAMI_BADTYPE;
+    }
+    
+    return BONAMI_OK;
 }
 
 /* Main daemon loop */
