@@ -26,11 +26,13 @@ BonAmi is an mDNS (multicast DNS) implementation for AmigaOS, designed to work w
    - Provides callback mechanism for service discovery
    - Manages service state and updates
 
-3. **Command Line Tools**
-   - `bonami-register`: Register services
-   - `bonami-browse`: Browse available services
-   - `bonami-query`: Query specific service types
-   - `bonami-unregister`: Remove service registrations
+3. **Command Line Tool (bactl)**
+   - Single unified tool for all mDNS operations
+   - Register and unregister services
+   - Discover and browse available services
+   - Monitor service availability
+   - Configure daemon settings
+   - View system status
 
 ### Technical Constraints
 
@@ -93,7 +95,7 @@ BonAmi is an mDNS (multicast DNS) implementation for AmigaOS, designed to work w
 ### Service Registration
 
 ```c
-LONG BonamiRegisterService(struct BonamiService *service);
+LONG BARegisterService(struct BAService *service);
 ```
 Registers a service for advertisement on the local network. The service structure contains:
 - name: Service instance name
@@ -104,7 +106,7 @@ Registers a service for advertisement on the local network. The service structur
 ### Service Discovery
 
 ```c
-LONG BonamiStartDiscovery(struct BonamiDiscovery *discovery);
+LONG BAStartDiscovery(struct BADiscovery *discovery);
 ```
 Starts discovering services of a specific type. The discovery structure contains:
 - type: Service type to discover
@@ -114,21 +116,21 @@ Starts discovering services of a specific type. The discovery structure contains
 ### Service Resolution
 
 ```c
-LONG BonamiResolveService(const char *name, const char *type, struct BonamiService *service);
+LONG BAResolveService(const char *name, const char *type, struct BAService *service);
 ```
 Resolves a specific service instance to get its details.
 
 ### Service Type Enumeration
 
 ```c
-LONG BonamiEnumerateServiceTypes(struct BonamiServiceType *types, LONG maxTypes);
+LONG BAEnumerateServiceTypes(struct List *types);
 ```
 Lists all service types currently available on the network.
 
 ### DNS Queries
 
 ```c
-LONG BonamiQueryDNS(const char *name, WORD type, WORD class, struct DNSRecord *records, LONG maxRecords);
+LONG BAQueryRecord(const char *name, UWORD type, UWORD class, void *result, LONG resultlen);
 ```
 Performs arbitrary DNS queries.
 
@@ -143,13 +145,13 @@ Performs arbitrary DNS queries.
 2. **Installation Steps**
    ```bash
    # Copy the daemon
-   copy SYS:Utilities/BonAmi/bonami TO SYS:Utilities/BonAmi/
+   copy SYS:Utilities/BonAmi/bonamid TO SYS:Utilities/BonAmi/
    
    # Copy the library
    copy SYS:Libs/bonami.library TO SYS:Libs/
    
-   # Copy the tools
-   copy SYS:Utilities/BonAmi/bonami-* TO SYS:Utilities/BonAmi/
+   # Copy the command-line tool
+   copy SYS:Utilities/BonAmi/bactl TO SYS:Utilities/BonAmi/
    
    # Add to Startup-Sequence
    copy S/BonAmi-Startup TO S:Startup-Sequence
@@ -172,22 +174,21 @@ Build steps:
 # Using SAS/C
 smake
 
-# Using GCC
+# Using GCC on OS4
 make
 ```
 
 ## Debugging
 
 BonAmi supports several debugging options:
-- Set log level in ENV:Bonami/config (0-2)
-- Use bonami-register -v for verbose output
-- Check SYS:Logs/BonAmi.log for daemon logs
+- Set log level in ENV:Bonami/config (0-3)
+- Use bactl with -v for verbose output
 - Monitor network interface status
 - Check service conflict resolution
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+TBD
 
 ## Contributing
 
@@ -199,6 +200,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
-- Inspired by Apple's Bonjour
-- Built on Roadshow TCP/IP stack
-- Thanks to the AmigaOS community 
+- Depends on Roadshow TCP/IP stack
