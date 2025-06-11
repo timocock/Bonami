@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include "../include/dns.h"
+#include "../include/bonami.h"
 
 /* Parse a DNS message */
 LONG dnsParseMessage(const UBYTE *data, LONG len, struct DNSMessage *msg)
@@ -71,7 +72,7 @@ LONG dnsParseQuestion(const UBYTE *data, LONG len, struct DNSQuestion *q)
         return -1;
 
     /* Parse name */
-    LONG nameLen = dnsLabelsToName(data, len, q->qname, BONAMI_MAX_NAME_LEN);
+    LONG nameLen = dnsLabelsToName(data, len, q->qname, BA_MAX_NAME_LEN);
     if (nameLen < 0)
         return -1;
 
@@ -93,7 +94,7 @@ LONG dnsParseRecord(const UBYTE *data, LONG len, struct DNSRecord *r)
         return -1;
 
     /* Parse name */
-    LONG nameLen = dnsLabelsToName(data, len, r->name, BONAMI_MAX_NAME_LEN);
+    LONG nameLen = dnsLabelsToName(data, len, r->name, BA_MAX_NAME_LEN);
     if (nameLen < 0)
         return -1;
 
