@@ -459,7 +459,7 @@ struct Library *OpenLibrary(void)
     }
     
     /* Find daemon port */
-    base->daemonPort = FindPort("BONAMI_DAEMON");
+    base->daemonPort = FindPort("Bonami");
     if (!base->daemonPort) {
         DeleteMsgPort(base->replyPort);
         FreeMem(base, sizeof(struct BonamiBase));
