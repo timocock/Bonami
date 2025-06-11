@@ -174,6 +174,10 @@ static void addQuestion(struct InterfaceState *iface, struct DNSQuestion *questi
 static void removeRecord(struct InterfaceState *iface, const char *name, UWORD type);
 static void scheduleAnnouncement(struct InterfaceState *iface, struct DNSRecord *record);
 static void scheduleQuery(struct InterfaceState *iface, struct DNSQuestion *question);
+static struct DNSQuery *getNextQuery(struct InterfaceState *iface);
+static void requeueQuery(struct InterfaceState *iface, struct DNSQuery *query);
+static LONG sendQuery(struct InterfaceState *iface, struct DNSQuery *query);
+static void cleanupList(struct List *list);
 
 /* Main function */
 int main(int argc, char **argv) {
@@ -1073,4 +1077,630 @@ static void scheduleQuery(struct InterfaceState *iface, struct DNSQuestion *ques
     
     /* Add to probe list */
     AddTail(iface->probes, (struct Node *)probe);
+}
+
+/* Network monitor task */
+static void networkMonitorTask(void)
+{
+    struct InterfaceState *iface;
+    LONG i;
+    
+    while (bonami.running) {
+        /* Check network status */
+        if (checkNetworkStatus() != BA_OK) {
+            /* Network is down, wait before retrying */
+            Delay(50);
+            continue;
+        }
+        
+        /* Check all interfaces */
+        for (i = 0; i < bonami.numInterfaces; i++) {
+            iface = &bonami.interfaces[i];
+            if (checkInterface(iface) != BA_OK) {
+                /* Interface is down, wait before retrying */
+                Delay(50);
+                continue;
+            }
+            
+            /* Update interface services */
+            updateInterfaceServices(iface);
+        }
+        
+        /* Wait before next check */
+        Delay(50);
+    }
+}
+
+/* Discovery task */
+static void discoveryTask(void)
+{
+    struct InterfaceState *iface;
+    struct DNSQuery *query;
+    LONG i;
+    
+    while (bonami.running) {
+        /* Process all interfaces */
+        for (i = 0; i < bonami.numInterfaces; i++) {
+            iface = &bonami.interfaces[i];
+            if (!iface->active) {
+                continue;
+            }
+            
+            /* Process service states */
+            processServiceStates(iface);
+            
+            /* Process DNS queries */
+            while ((query = getNextQuery(iface)) != NULL) {
+                if (processDNSQuery(query) != BA_OK) {
+                    /* Query failed, try again later */
+                    requeueQuery(iface, query);
+                }
+            }
+        }
+        
+        /* Wait before next check */
+        Delay(10);
+    }
+}
+
+/* Create multicast socket */
+static LONG createMulticastSocket(void)
+{
+    struct sockaddr_in addr;
+    LONG sock;
+    
+    /* Create socket */
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        return BA_ERROR;
+    }
+    
+    /* Set socket options */
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0) {
+        close(sock);
+        return BA_ERROR;
+    }
+    
+    /* Bind to multicast address */
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr("224.0.0.251");
+    addr.sin_port = htons(5353);
+    
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return BA_ERROR;
+    }
+    
+    /* Join multicast group */
+    struct ip_mreq mreq;
+    mreq.imr_multiaddr.s_addr = inet_addr("224.0.0.251");
+    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+    
+    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+        close(sock);
+        return BA_ERROR;
+    }
+    
+    return sock;
+}
+
+/* Check network status */
+static LONG checkNetworkStatus(void)
+{
+    struct InterfaceState *iface;
+    LONG i;
+    
+    /* Check if any interface is active */
+    for (i = 0; i < bonami.numInterfaces; i++) {
+        iface = &bonami.interfaces[i];
+        if (iface->active) {
+            return BA_OK;
+        }
+    }
+    
+    return BA_ERROR;
+}
+
+/* Update service records */
+static void updateServiceRecords(struct BAServiceNode *service)
+{
+    struct InterfaceState *iface;
+    LONG i;
+    
+    /* Update on all interfaces */
+    for (i = 0; i < bonami.numInterfaces; i++) {
+        iface = &bonami.interfaces[i];
+        if (iface->active) {
+            /* Remove old records */
+            removeServiceRecords(service);
+            
+            /* Add new records */
+            startServiceProbing(iface, &service->service);
+        }
+    }
+}
+
+/* Process DNS query */
+static LONG processDNSQuery(struct DNSQuery *query)
+{
+    struct DNSRecord *record;
+    struct DNSQuestion *question;
+    struct InterfaceState *iface;
+    LONG i;
+    
+    /* Process all interfaces */
+    for (i = 0; i < bonami.numInterfaces; i++) {
+        iface = &bonami.interfaces[i];
+        if (!iface->active) {
+            continue;
+        }
+        
+        /* Check records */
+        for (record = (struct DNSRecord *)iface->records->lh_Head;
+             record->node.ln_Succ;
+             record = (struct DNSRecord *)record->node.ln_Succ) {
+            if (strcmp(record->name, query->name) == 0 &&
+                record->type == query->type &&
+                record->class == query->class) {
+                /* Found matching record */
+                return BA_OK;
+            }
+        }
+        
+        /* Check questions */
+        for (question = (struct DNSQuestion *)iface->questions->lh_Head;
+             question->node.ln_Succ;
+             question = (struct DNSQuestion *)question->node.ln_Succ) {
+            if (strcmp(question->name, query->name) == 0 &&
+                question->type == query->type &&
+                question->class == query->class) {
+                /* Found matching question */
+                return BA_OK;
+            }
+        }
+    }
+    
+    return BA_NOTFOUND;
+}
+
+/* Validate service name */
+static LONG validateServiceName(const char *name)
+{
+    const char *p;
+    
+    /* Check for empty name */
+    if (!name || !*name) {
+        return BA_BADNAME;
+    }
+    
+    /* Check length */
+    if (strlen(name) > 63) {
+        return BA_BADNAME;
+    }
+    
+    /* Check characters */
+    for (p = name; *p; p++) {
+        if (!isalnum(*p) && *p != '-' && *p != '.') {
+            return BA_BADNAME;
+        }
+    }
+    
+    return BA_OK;
+}
+
+/* Initialize interfaces */
+static LONG initInterfaces(void)
+{
+    struct InterfaceState *iface;
+    LONG i;
+    
+    /* Allocate interface array */
+    bonami.interfaces = AllocMem(sizeof(struct InterfaceState) * MAX_INTERFACES,
+                               MEMF_CLEAR);
+    if (!bonami.interfaces) {
+        return BA_NOMEM;
+    }
+    
+    /* Initialize interfaces */
+    for (i = 0; i < MAX_INTERFACES; i++) {
+        iface = &bonami.interfaces[i];
+        
+        /* Initialize lists */
+        NewList(iface->records);
+        NewList(iface->questions);
+        NewList(iface->probes);
+        NewList(iface->announces);
+        
+        /* Initialize socket */
+        iface->socket = createMulticastSocket();
+        if (iface->socket < 0) {
+            cleanupInterfaces();
+            return BA_ERROR;
+        }
+        
+        /* Set interface active */
+        iface->active = TRUE;
+    }
+    
+    bonami.numInterfaces = MAX_INTERFACES;
+    return BA_OK;
+}
+
+/* Cleanup interfaces */
+static void cleanupInterfaces(void)
+{
+    struct InterfaceState *iface;
+    LONG i;
+    
+    if (!bonami.interfaces) {
+        return;
+    }
+    
+    /* Cleanup interfaces */
+    for (i = 0; i < bonami.numInterfaces; i++) {
+        iface = &bonami.interfaces[i];
+        
+        /* Close socket */
+        if (iface->socket >= 0) {
+            close(iface->socket);
+        }
+        
+        /* Free lists */
+        cleanupList(iface->records);
+        cleanupList(iface->questions);
+        cleanupList(iface->probes);
+        cleanupList(iface->announces);
+    }
+    
+    /* Free interface array */
+    FreeMem(bonami.interfaces, sizeof(struct InterfaceState) * MAX_INTERFACES);
+    bonami.interfaces = NULL;
+    bonami.numInterfaces = 0;
+}
+
+/* Check interface */
+static LONG checkInterface(struct InterfaceState *iface)
+{
+    struct ifreq ifr;
+    
+    /* Get interface status */
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, iface->name, sizeof(ifr.ifr_name) - 1);
+    
+    if (ioctl(iface->socket, SIOCGIFFLAGS, &ifr) < 0) {
+        return BA_ERROR;
+    }
+    
+    /* Check if interface is up */
+    if (!(ifr.ifr_flags & IFF_UP)) {
+        return BA_ERROR;
+    }
+    
+    return BA_OK;
+}
+
+/* Update interface services */
+static void updateInterfaceServices(struct InterfaceState *iface)
+{
+    struct BAServiceNode *service;
+    
+    /* Update all services */
+    for (service = (struct BAServiceNode *)bonami.services->lh_Head;
+         service->node.ln_Succ;
+         service = (struct BAServiceNode *)service->node.ln_Succ) {
+        updateServiceRecords(service);
+    }
+}
+
+/* Add cache entry */
+static void addCacheEntry(const char *name, WORD type, WORD class,
+                         const void *data, LONG length)
+{
+    struct CacheEntry *entry;
+    
+    /* Allocate entry */
+    entry = AllocMem(sizeof(struct CacheEntry), MEMF_CLEAR);
+    if (!entry) {
+        return;
+    }
+    
+    /* Initialize entry */
+    entry->name = strdup(name);
+    if (!entry->name) {
+        FreeMem(entry, sizeof(struct CacheEntry));
+        return;
+    }
+    
+    entry->type = type;
+    entry->class = class;
+    entry->data = AllocMem(length, MEMF_CLEAR);
+    if (!entry->data) {
+        FreeMem(entry->name, strlen(name) + 1);
+        FreeMem(entry, sizeof(struct CacheEntry));
+        return;
+    }
+    
+    memcpy(entry->data, data, length);
+    entry->length = length;
+    entry->expires = GetSysTime() + 120;  /* 2 minutes */
+    
+    /* Add to cache */
+    AddTail(bonami.cache, (struct Node *)entry);
+}
+
+/* Remove cache entry */
+static void removeCacheEntry(const char *name, WORD type, WORD class)
+{
+    struct CacheEntry *entry;
+    struct CacheEntry *next;
+    
+    for (entry = (struct CacheEntry *)bonami.cache->lh_Head;
+         entry->node.ln_Succ;
+         entry = next) {
+        next = (struct CacheEntry *)entry->node.ln_Succ;
+        
+        if (strcmp(entry->name, name) == 0 &&
+            entry->type == type &&
+            entry->class == class) {
+            /* Remove from cache */
+            Remove((struct Node *)entry);
+            
+            /* Free memory */
+            FreeMem(entry->name, strlen(entry->name) + 1);
+            FreeMem(entry->data, entry->length);
+            FreeMem(entry, sizeof(struct CacheEntry));
+        }
+    }
+}
+
+/* Find cache entry */
+static struct CacheEntry *findCacheEntry(const char *name, WORD type, WORD class)
+{
+    struct CacheEntry *entry;
+    
+    for (entry = (struct CacheEntry *)bonami.cache->lh_Head;
+         entry->node.ln_Succ;
+         entry = (struct CacheEntry *)entry->node.ln_Succ) {
+        if (strcmp(entry->name, name) == 0 &&
+            entry->type == type &&
+            entry->class == class) {
+            return entry;
+        }
+    }
+    
+    return NULL;
+}
+
+/* Cleanup cache */
+static void cleanupCache(void)
+{
+    struct CacheEntry *entry;
+    struct CacheEntry *next;
+    
+    for (entry = (struct CacheEntry *)bonami.cache->lh_Head;
+         entry->node.ln_Succ;
+         entry = next) {
+        next = (struct CacheEntry *)entry->node.ln_Succ;
+        
+        /* Remove from cache */
+        Remove((struct Node *)entry);
+        
+        /* Free memory */
+        FreeMem(entry->name, strlen(entry->name) + 1);
+        FreeMem(entry->data, entry->length);
+        FreeMem(entry, sizeof(struct CacheEntry));
+    }
+}
+
+/* Resolve hostname */
+static LONG resolveHostname(void)
+{
+    struct hostent *host;
+    
+    /* Get hostname */
+    host = gethostbyname(bonami.config.hostname);
+    if (!host) {
+        return BA_ERROR;
+    }
+    
+    /* Copy address */
+    memcpy(&bonami.config.address, host->h_addr, host->h_length);
+    
+    return BA_OK;
+}
+
+/* Check service conflict */
+static LONG checkServiceConflict(const char *name, const char *type)
+{
+    struct InterfaceState *iface;
+    struct DNSQuery query;
+    LONG i;
+    
+    /* Initialize query */
+    memset(&query, 0, sizeof(query));
+    strncpy(query.name, name, sizeof(query.name) - 1);
+    query.type = DNS_TYPE_ANY;
+    query.class = DNS_CLASS_IN;
+    
+    /* Check all interfaces */
+    for (i = 0; i < bonami.numInterfaces; i++) {
+        iface = &bonami.interfaces[i];
+        if (!iface->active) {
+            continue;
+        }
+        
+        /* Send probe */
+        if (sendQuery(iface, &query) != BA_OK) {
+            continue;
+        }
+        
+        /* Wait for response */
+        Delay(250);
+        
+        /* Check for response */
+        if (processDNSQuery(&query) == BA_OK) {
+            return BA_CONFLICT;
+        }
+    }
+    
+    return BA_OK;
+}
+
+/* Start service announcement */
+static void startServiceAnnouncement(struct InterfaceState *iface, struct BAService *service)
+{
+    struct DNSRecord *record;
+    
+    /* Create PTR record */
+    record = createPTRRecord(service->type, service->name);
+    if (!record) {
+        return;
+    }
+    
+    /* Add to interface */
+    addRecord(iface, record);
+    
+    /* Create SRV record */
+    record = createSRVRecord(service->name, service->port, service->host);
+    if (!record) {
+        return;
+    }
+    
+    /* Add to interface */
+    addRecord(iface, record);
+    
+    /* Create TXT record */
+    record = createTXTRecord(service->name, service->txt);
+    if (!record) {
+        return;
+    }
+    
+    /* Add to interface */
+    addRecord(iface, record);
+}
+
+/* Process service states */
+static void processServiceStates(struct InterfaceState *iface)
+{
+    struct BAServiceNode *service;
+    struct BAServiceNode *next;
+    
+    for (service = (struct BAServiceNode *)bonami.services->lh_Head;
+         service->node.ln_Succ;
+         service = next) {
+        next = (struct BAServiceNode *)service->node.ln_Succ;
+        
+        switch (service->state) {
+            case 0:  /* Probing */
+                if (service->probeCount >= 3) {
+                    /* No conflicts found, start announcing */
+                    service->state = 1;
+                    service->announceCount = 0;
+                    startServiceAnnouncement(iface, &service->service);
+                }
+                break;
+                
+            case 1:  /* Announcing */
+                if (service->announceCount >= 3) {
+                    /* Announcement complete */
+                    service->state = 2;
+                }
+                break;
+                
+            case 2:  /* Stable */
+                /* Nothing to do */
+                break;
+        }
+    }
+}
+
+/* Process update callbacks */
+static void processUpdateCallbacks(struct BAService *service)
+{
+    struct BAMonitor *monitor;
+    
+    for (monitor = (struct BAMonitor *)bonami.monitors->lh_Head;
+         monitor->node.ln_Succ;
+         monitor = (struct BAMonitor *)monitor->node.ln_Succ) {
+        if (strcmp(monitor->type, service->type) == 0) {
+            /* Call callback */
+            monitor->callback(service, monitor->userData);
+        }
+    }
+}
+
+/* Get next query from interface */
+static struct DNSQuery *getNextQuery(struct InterfaceState *iface)
+{
+    struct DNSQuery *query;
+    
+    /* Get first query */
+    query = (struct DNSQuery *)iface->questions->lh_Head;
+    if (!query->node.ln_Succ) {
+        return NULL;
+    }
+    
+    /* Remove from list */
+    Remove((struct Node *)query);
+    
+    return query;
+}
+
+/* Requeue query on interface */
+static void requeueQuery(struct InterfaceState *iface, struct DNSQuery *query)
+{
+    /* Add to end of list */
+    AddTail(iface->questions, (struct Node *)query);
+}
+
+/* Send query on interface */
+static LONG sendQuery(struct InterfaceState *iface, struct DNSQuery *query)
+{
+    struct sockaddr_in addr;
+    struct DNSMessage msg;
+    LONG result;
+    
+    /* Initialize message */
+    memset(&msg, 0, sizeof(msg));
+    msg.id = rand();
+    msg.flags = DNS_FLAG_QUERY;
+    msg.qdcount = 1;
+    
+    /* Add question */
+    strncpy(msg.questions[0].name, query->name, sizeof(msg.questions[0].name) - 1);
+    msg.questions[0].type = query->type;
+    msg.questions[0].class = query->class;
+    
+    /* Initialize address */
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr("224.0.0.251");
+    addr.sin_port = htons(5353);
+    
+    /* Send message */
+    result = sendto(iface->socket, &msg, sizeof(msg), 0,
+                   (struct sockaddr *)&addr, sizeof(addr));
+    if (result < 0) {
+        return BA_ERROR;
+    }
+    
+    return BA_OK;
+}
+
+/* Cleanup list */
+static void cleanupList(struct List *list)
+{
+    struct Node *node;
+    struct Node *next;
+    
+    for (node = list->lh_Head; node->ln_Succ; node = next) {
+        next = node->ln_Succ;
+        
+        /* Remove from list */
+        Remove(node);
+        
+        /* Free memory */
+        FreeMem(node, sizeof(struct Node));
+    }
 } 
