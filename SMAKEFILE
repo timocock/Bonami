@@ -3,8 +3,8 @@
 
 # Compiler and flags
 CC = gcc
-CFLAGS = -mcrt=clib2 -O2 -Wall -Werror -std=c89 -D__USE_INLINE__ -D__USE_BASETYPE__
-LDFLAGS = -mcrt=clib2
+CFLAGS = -mcrt=newlib -O2 -Wall -Werror -std=c89 -D__USE_INLINE__ -D__USE_BASETYPE__ -D__amigaos4__ -I./include
+LDFLAGS = -mcrt=newlib
 
 # Directories
 SRC_DIR = src
@@ -14,31 +14,36 @@ LIB_DIR = lib
 BIN_DIR = bin
 
 # Source files
-LIB_SRCS = $(SRC_DIR)/bonami_lib.c
 DAEMON_SRCS = $(SRC_DIR)/bonami.c
+CTL_SRCS = $(SRC_DIR)/bonami_cmd.c
+LIB_SRCS = $(SRC_DIR)/bonami_lib.c
 
 # Object files
-LIB_OBJS = $(LIB_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 DAEMON_OBJS = $(DAEMON_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+CTL_OBJS = $(CTL_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+LIB_OBJS = $(LIB_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 # Targets
-LIB_TARGET = $(LIB_DIR)/bonami.library
 DAEMON_TARGET = $(BIN_DIR)/bonamid
+CTL_TARGET = $(BIN_DIR)/bactl
+LIB_TARGET = $(LIB_DIR)/libbonami.a
 
 # Default target
-all: directories $(LIB_TARGET) $(DAEMON_TARGET)
+all: directories $(DAEMON_TARGET) $(CTL_TARGET) $(LIB_TARGET)
 
 # Create directories
 directories:
 	@mkdir -p $(OBJ_DIR) $(LIB_DIR) $(BIN_DIR)
 
-# Build library
-$(LIB_TARGET): $(LIB_OBJS)
-	$(CC) $(LDFLAGS) -nostartfiles -o $@ $(LIB_OBJS) -ldebug
+# Build rules
+$(DAEMON_TARGET): $(DAEMON_OBJS) $(LIB_TARGET)
+	$(CC) $(LDFLAGS) -o $@ $(DAEMON_OBJS) $(LIB_TARGET) -ldebug -lauto
 
-# Build daemon
-$(DAEMON_TARGET): $(DAEMON_OBJS)
-	$(CC) $(LDFLAGS) -o $@ $(DAEMON_OBJS) -ldebug
+$(CTL_TARGET): $(CTL_OBJS) $(LIB_TARGET)
+	$(CC) $(LDFLAGS) -o $@ $(CTL_OBJS) $(LIB_TARGET) -ldebug -lauto
+
+$(LIB_TARGET): $(LIB_OBJS)
+	ar rcs $@ $(LIB_OBJS)
 
 # Compile library objects
 $(OBJ_DIR)/bonami_lib.o: $(SRC_DIR)/bonami_lib.c $(INCLUDE_DIR)/bonami.h
@@ -54,7 +59,7 @@ clean:
 
 # Install
 install: all
-	cp $(LIB_TARGET) LIBS:
-	cp $(DAEMON_TARGET) C:
+	cp $(DAEMON_TARGET) $(CTL_TARGET) $(LIB_TARGET) SYS:Utilities/
+	cp $(INCLUDE_DIR)/bonami.h SYS:Developer/include/
 
 .PHONY: all clean install directories 

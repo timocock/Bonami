@@ -6,8 +6,8 @@
 
 # Compiler and flags
 CC = gcc
-CFLAGS = -mcrt=newlib -O2 -Wall -Werror -std=c89 -D__USE_INLINE__ -D__USE_BASETYPE__ -D__amigaos4__
-LDFLAGS = -mcrt=newlib
+CFLAGS = -Wall -O2 -I./include
+LDFLAGS = -lauto
 
 # Directories
 SRC_DIR = src
@@ -43,12 +43,12 @@ $(LIB_TARGET): $(LIB_OBJS)
 	$(CC) $(LDFLAGS) -nostartfiles -o $@ $(LIB_OBJS) -ldebug
 
 # Build daemon
-$(DAEMON_TARGET): $(DAEMON_OBJS)
-	$(CC) $(LDFLAGS) -o $@ $(DAEMON_OBJS) -ldebug
+$(DAEMON_TARGET): $(DAEMON_OBJS) $(LIB_TARGET)
+	$(CC) $(CFLAGS) -o $@ $(DAEMON_OBJS) $(LIB_TARGET) $(LDFLAGS)
 
 # Build control utility
-$(CTL_TARGET): $(CTL_OBJS)
-	$(CC) $(LDFLAGS) -o $@ $(CTL_OBJS) -ldebug
+$(CTL_TARGET): $(CTL_OBJS) $(LIB_TARGET)
+	$(CC) $(CFLAGS) -o $@ $(CTL_OBJS) $(LIB_TARGET) $(LDFLAGS)
 
 # Compile library objects
 $(OBJ_DIR)/bonami_lib.o: $(SRC_DIR)/bonami_lib.c $(INCLUDE_DIR)/bonami.h
