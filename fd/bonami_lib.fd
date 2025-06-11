@@ -1,0 +1,18 @@
+##base _BonamiBase
+##bias 30
+
+##public
+BonamiRegisterService(service) (a0)
+BonamiUnregisterService(name, type) (a0, a1)
+BonamiStartDiscovery(discovery) (a0)
+BonamiStopDiscovery(discovery) (a0)
+BonamiGetServiceInfo(info, name, type) (a0, a1, a2)
+BonamiEnumerateServices(services, type) (a0, a1)
+BonamiEnumerateServiceTypes(types) (a0)
+BonamiQueryRecord(name, type, class, result, resultlen) (a0, d0, d1, a1, d2)
+BonamiSetDiscoveryCallback(discovery, callback) (a0, a1)
+BonamiUpdateServiceTXT(name, type, txt) (a0, a1, a2)
+BonamiUpdateService(service) (a0)
+OpenLibrary() ()
+CloseLibrary() ()
+ExpungeLibrary() () 
