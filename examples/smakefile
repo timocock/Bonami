@@ -1,7 +1,7 @@
-# makefile for AmigaOS 4.x
+# smakefile for AmigaOS 3.x
 
-CC = gcc
-CFLAGS = -O2 -Wall -I../include -D__USE_INLINE__
+CC = vc
+CFLAGS = -c99 -O2 -Wall -I../include
 LDFLAGS = -lamiga
 
 all: find_samba
