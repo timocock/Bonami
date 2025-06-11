@@ -16,6 +16,11 @@
 /* Version string */
 static const char version[] = "$VER: bactl 1.0 (01.01.2024)";
 
+/* Memory pool sizes */
+#define POOL_PUDDLE_SIZE   4096
+#define POOL_THRESHOLD     128
+#define POOL_MAX_PUDDLES   16
+
 /* Command structure */
 struct Command {
     const char *name;
@@ -23,6 +28,13 @@ struct Command {
     const char *description;
     LONG (*handler)(struct RDArgs *args);
 };
+
+/* Global state */
+static struct {
+    APTR memPool;     /* Memory pool for allocations */
+    struct Task *mainTask;
+    BOOL debug;
+} cmd;
 
 /* Forward declarations */
 static void printUsage(const struct Command *cmd);
@@ -106,8 +118,49 @@ static void printHelp(void) {
     printf("\nUse 'bactl <command>' for more information about a command.\n");
 }
 
+/* Initialize command tool */
+static LONG initCommand(void)
+{
+    /* Create memory pool */
+    cmd.memPool = CreatePool(MEMF_ANY, POOL_PUDDLE_SIZE, POOL_THRESHOLD);
+    if (!cmd.memPool) {
+        return RETURN_ERROR;
+    }
+    
+    /* Initialize state */
+    cmd.debug = FALSE;
+    cmd.mainTask = FindTask(NULL);
+    
+    return RETURN_OK;
+}
+
+/* Cleanup command tool */
+static void cleanupCommand(void)
+{
+    /* Delete memory pool */
+    if (cmd.memPool) {
+        DeletePool(cmd.memPool);
+        cmd.memPool = NULL;
+    }
+}
+
+/* Allocate from pool */
+static APTR AllocPooled(ULONG size)
+{
+    if (!cmd.memPool) return NULL;
+    return AllocPooled(cmd.memPool, size);
+}
+
+/* Free from pool */
+static void FreePooled(APTR memory, ULONG size)
+{
+    if (!cmd.memPool || !memory) return;
+    FreePooled(cmd.memPool, memory, size);
+}
+
 /* Handle discover command */
-static LONG handleDiscover(struct RDArgs *args) {
+static LONG handleDiscover(struct RDArgs *args)
+{
     struct BADiscovery discovery;
     struct List services;
     struct BAServiceInfo *info;
@@ -165,7 +218,8 @@ static LONG handleDiscover(struct RDArgs *args) {
 }
 
 /* Handle register command */
-static LONG handleRegister(struct RDArgs *args) {
+static LONG handleRegister(struct RDArgs *args)
+{
     struct BAService service;
     struct BATXTRecord *txt = NULL;
     char *name = NULL;
@@ -480,10 +534,17 @@ static void handleSignals(void) {
 }
 
 /* Main function */
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     struct RDArgs *args;
     const struct Command *cmd;
     LONG result = RETURN_OK;
+
+    /* Initialize command tool */
+    if (initCommand() != RETURN_OK) {
+        printf("Error: Failed to initialize command tool\n");
+        return RETURN_ERROR;
+    }
 
     /* Set up signal handling */
     SetSignal(0, SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E);
@@ -491,6 +552,7 @@ int main(int argc, char **argv) {
     /* Check arguments */
     if (argc < 2) {
         printHelp();
+        cleanupCommand();
         return RETURN_OK;
     }
 
@@ -504,6 +566,7 @@ int main(int argc, char **argv) {
     if (!cmd->name) {
         printf("Error: Unknown command '%s'\n", argv[1]);
         printHelp();
+        cleanupCommand();
         return RETURN_ERROR;
     }
 
@@ -515,6 +578,7 @@ int main(int argc, char **argv) {
         } else {
             printf("Error: Invalid arguments\n");
         }
+        cleanupCommand();
         return RETURN_ERROR;
     }
 
@@ -523,5 +587,6 @@ int main(int argc, char **argv) {
 
     /* Cleanup */
     FreeArgs(args);
+    cleanupCommand();
     return result;
 } 

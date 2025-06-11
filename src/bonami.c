@@ -57,6 +57,11 @@ static const char version[] = "$VER: bonamid 1.0 (01.01.2024)";
 #define MSG_CONFIG      9
 #define MSG_ENUMERATE   10
 
+/* Memory pool sizes */
+#define POOL_PUDDLE_SIZE   8192
+#define POOL_THRESHOLD     256
+#define POOL_MAX_PUDDLES   32
+
 /* Interface state */
 struct InterfaceState {
     struct in_addr addr;
@@ -117,6 +122,9 @@ static struct {
     BOOL debug;
     LONG log_level;
     BPTR log_file;
+    APTR memPool;     /* Memory pool for allocations */
+    struct Task *mainTask;
+    struct MsgPort *port;
 } bonami;
 
 /* Function prototypes */
@@ -228,6 +236,13 @@ static LONG initDaemon(void)
         return BA_ERROR;
     }
     
+    /* Create memory pool */
+    bonami.memPool = CreatePool(MEMF_ANY, POOL_PUDDLE_SIZE, POOL_THRESHOLD);
+    if (!bonami.memPool) {
+        FreeArgs(args);
+        return BA_NOMEM;
+    }
+    
     /* Initialize lists */
     NewList(&bonami.services);
     NewList(&bonami.discoveries);
@@ -241,6 +256,14 @@ static LONG initDaemon(void)
     bonami.log_level = LOG_INFO;
     bonami.log_file = NULL;
     
+    /* Create message port */
+    bonami.port = CreateMsgPort();
+    if (!bonami.port) {
+        DeletePool(bonami.memPool);
+        FreeArgs(args);
+        return BA_ERROR;
+    }
+    
     /* Set debug flag */
     if (args->RDA_Flags & RDAF_LOG) {
         bonami.debug = TRUE;
@@ -250,7 +273,8 @@ static LONG initDaemon(void)
     if (args->RDA_Flags & RDAF_LOGFILE) {
         bonami.log_file = Open((char *)args->RDA_LOGFILE, MODE_NEWFILE);
         if (!bonami.log_file) {
-            printf("Error: Failed to open log file\n");
+            DeleteMsgPort(bonami.port);
+            DeletePool(bonami.memPool);
             FreeArgs(args);
             return BA_ERROR;
         }
@@ -262,6 +286,8 @@ static LONG initDaemon(void)
         if (bonami.log_file) {
             Close(bonami.log_file);
         }
+        DeleteMsgPort(bonami.port);
+        DeletePool(bonami.memPool);
         FreeArgs(args);
         return result;
     }
@@ -272,6 +298,8 @@ static LONG initDaemon(void)
         if (bonami.log_file) {
             Close(bonami.log_file);
         }
+        DeleteMsgPort(bonami.port);
+        DeletePool(bonami.memPool);
         FreeArgs(args);
         return result;
     }
@@ -393,6 +421,18 @@ static void cleanupDaemon(void)
     while (RemHead(&bonami.services));
     while (RemHead(&bonami.discoveries));
     while (RemHead(&bonami.monitors));
+    
+    /* Delete message port */
+    if (bonami.port) {
+        DeleteMsgPort(bonami.port);
+        bonami.port = NULL;
+    }
+    
+    /* Delete memory pool */
+    if (bonami.memPool) {
+        DeletePool(bonami.memPool);
+        bonami.memPool = NULL;
+    }
 }
 
 /* Validate service type */
@@ -1782,4 +1822,18 @@ static void logMessage(LONG level, const char *format, ...)
     else if (bonami.debug) {
         printf("%s%s\n", prefix, buffer);
     }
+}
+
+/* Allocate from pool */
+static APTR AllocPooled(ULONG size)
+{
+    if (!bonami.memPool) return NULL;
+    return AllocPooled(bonami.memPool, size);
+}
+
+/* Free from pool */
+static void FreePooled(APTR memory, ULONG size)
+{
+    if (!bonami.memPool || !memory) return;
+    FreePooled(bonami.memPool, memory, size);
 } 
