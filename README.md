@@ -1,207 +1,173 @@
-# BonAmi - mDNS Implementation for AmigaOS
+# BonAmi mDNS Library
 
-BonAmi is an mDNS (multicast DNS) implementation for AmigaOS, designed to work with the Roadshow TCP/IP stack. It provides functionality similar to Apple's Bonjour, allowing Amiga computers to discover and advertise services on their local network.
+A lightweight mDNS (multicast DNS) library for AmigaOS 3.x and 4.x, providing service discovery and registration capabilities.
 
-## Architecture Overview
+## Architecture
 
-### Core Components
+BonAmi follows a client-server architecture:
 
-1. **mDNS Daemon (bonami)**
-   - Runs as a background process
-   - Handles multicast DNS queries and responses
-   - Manages service registration and discovery
-   - Uses Roadshow's bsdsocket.library for network communication
-   - Implements RFC 6762 (mDNS) and RFC 6763 (DNS-SD)
-   - Monitors network interface status
-   - Implements service conflict resolution
-   - Manages DNS record caching
-   - Handles TTL management
-   - Supports multiple network interfaces
+- **Library (`bonami.library`)**: A thin client library that provides a simple API for applications to interact with the mDNS daemon. The library is stateless and handles message passing to the daemon.
 
-2. **Library Interface (bonami.library)**
-   - Provides API for applications to register and discover services
-   - Handles communication with the daemon via message passing
-   - Implements the mDNS protocol according to RFC 6762
-   - Supports both synchronous and asynchronous operations
-   - Provides callback mechanism for service discovery
-   - Manages service state and updates
+- **Daemon (`Bonami`)**: A background process that manages all mDNS operations, including:
+  - Service registration and discovery
+  - Network interface management
+  - State management
+  - Resource management
+  - Memory pools for long-lived objects
 
-3. **Command Line Tool (bactl)**
-   - Single unified tool for all mDNS operations
-   - Register and unregister services
-   - Discover and browse available services
-   - Monitor service availability
-   - Configure daemon settings
-   - View system status
+## Features
 
-### Technical Constraints
+- Service registration and discovery
+- Support for TXT records
+- Automatic service conflict resolution
+- Service monitoring and updates
+- Thread-safe operations
+- Memory pool management
+- AmigaOS 3.x and 4.x support
 
-- IPv4 only (no IPv6 support)
-- C89 compatible code
-- Uses Roadshow's bsdsocket.library
-- Limited to AmigaOS system calls and APIs
-- Memory efficient design for classic Amiga hardware
-- Compatible with AmigaOS 3.x and higher
+## Building
 
-### Protocol Implementation
+### Requirements
 
-1. **Multicast Communication**
-   - Uses UDP port 5353
-   - Multicast address: 224.0.0.251
-   - TTL: 255 (local network only)
-   - Implements proper multicast group management
-   - Handles network interface changes
+- AmigaOS 3.1 or later
+- SAS/C or GCC compiler
+- Roadshow TCP/IP stack
 
-2. **Service Discovery**
-   - Implements DNS-SD (DNS Service Discovery)
-   - Supports service type enumeration
-   - Handles service instance resolution
-   - Implements service browsing and querying
-   - Supports service registration and unregistration
-   - Implements service conflict resolution
-   - Handles service state management
+### Building for AmigaOS 3.x
 
-3. **Resource Records**
-   - A Records (IPv4 addresses)
-   - PTR Records (service type enumeration)
-   - SRV Records (service location)
-   - TXT Records (service metadata)
-   - Implements proper TTL management
-   - Handles record conflicts
-   - Implements DNS record caching
+```bash
+smake
+```
 
-### Memory Management
+### Building for AmigaOS 4.x
 
-- Static memory allocation where possible
-- Limited dynamic allocation for service records
-- Fixed-size buffers for DNS messages
-- Efficient string handling for DNS names
-- Proper cleanup of resources
-- Memory pool for service records
-- Cache management for DNS records
+```bash
+make
+```
 
-### Error Handling
+## Usage
 
-- Robust error recovery
-- Graceful degradation under memory pressure
-- Clear error reporting to applications
-- Proper error codes and messages
-- Debug logging support
-- Service conflict handling
-- Network state management
+### Library API
 
-## Library Interface
+The library provides a simple API for applications to interact with the mDNS daemon:
+
+```c
+#include <proto/bonami.h>
+
+// Register a service
+struct BAService service = {
+    .name = "My Service",
+    .type = "_http._tcp",
+    .port = 80,
+    .txt = "path=/"
+};
+
+LONG result = BARegisterService(&service);
+
+// Discover services
+struct BAService *services;
+ULONG count;
+result = BADiscoverServices("_http._tcp", &services, &count);
+
+// Monitor services
+result = BAMonitorServices("_http._tcp", myCallback, NULL);
+
+// Unregister a service
+result = BAUnregisterService("My Service", "_http._tcp");
+```
+
+### Daemon
+
+The daemon must be running for the library to work. It can be started from the startup sequence:
+
+```
+C:bonamid
+```
+
+## Examples
 
 ### Service Registration
 
 ```c
-LONG BARegisterService(struct BAService *service);
+#include <proto/bonami.h>
+
+int main(int argc, char **argv)
+{
+    struct BAService service = {
+        .name = "My Service",
+        .type = "_http._tcp",
+        .port = 80,
+        .txt = "path=/"
+    };
+
+    LONG result = BARegisterService(&service);
+    if (result != BA_OK) {
+        printf("Failed to register service: %ld\n", result);
+        return 1;
+    }
+
+    return 0;
+}
 ```
-Registers a service for advertisement on the local network. The service structure contains:
-- name: Service instance name
-- type: Service type (e.g., "_http._tcp.local")
-- port: Service port number
-- txt: TXT record data
 
 ### Service Discovery
 
 ```c
-LONG BAStartDiscovery(struct BADiscovery *discovery);
-```
-Starts discovering services of a specific type. The discovery structure contains:
-- type: Service type to discover
-- callback: Function to call when services are found
-- userData: User data passed to callback
+#include <proto/bonami.h>
 
-### Service Resolution
+int main(int argc, char **argv)
+{
+    struct BAService *services;
+    ULONG count;
+    LONG result = BADiscoverServices("_http._tcp", &services, &count);
+    if (result != BA_OK) {
+        printf("Failed to discover services: %ld\n", result);
+        return 1;
+    }
 
-```c
-LONG BAResolveService(const char *name, const char *type, struct BAService *service);
-```
-Resolves a specific service instance to get its details.
+    for (ULONG i = 0; i < count; i++) {
+        printf("Service: %s\n", services[i].name);
+        printf("Host: %s\n", services[i].host);
+        printf("Port: %d\n", services[i].port);
+        printf("TXT: %s\n", services[i].txt);
+    }
 
-### Service Type Enumeration
-
-```c
-LONG BAEnumerateServiceTypes(struct List *types);
-```
-Lists all service types currently available on the network.
-
-### DNS Queries
-
-```c
-LONG BAQueryRecord(const char *name, UWORD type, UWORD class, void *result, LONG resultlen);
-```
-Performs arbitrary DNS queries.
-
-## Installation
-
-1. **System Requirements**
-   - AmigaOS 3.x or higher
-   - Roadshow TCP/IP stack
-   - 1MB of free memory
-   - 100KB of disk space
-
-2. **Installation Steps**
-   ```bash
-   # Create configuration directory
-   makedir SYS:Utilities/BonAmi
-   
-   # Copy the daemon
-   copy SYS:Utilities/BonAmi/bonamid TO SYS:Utilities/
-   
-   # Copy the library
-   copy SYS:Libs/bonami.library TO SYS:Libs/
-   
-   # Copy the command-line tool
-   copy SYS:Utilities/BonAmi/bactl TO C:
-   
-   # Add to Startup-Sequence
-   copy S/BonAmi-Startup TO S:Startup-Sequence
-   ```
-
-3. **Configuration**
-   - Edit S:BonAmi-Startup to customize startup options
-   - Set environment variables for debugging if needed
-   - Configure log level in SYS:Utilities/BonAmi/config
-   - Logs are stored in SYS:Utilities/BonAmi/logs
-
-## Building
-
-Requirements:
-- SAS/C or GCC for AmigaOS
-- Roadshow TCP/IP stack
-- AmigaOS 3.x or higher
-
-Build steps:
-```bash
-# Using SAS/C
-smake
-
-# Using GCC on OS4
-make
+    return 0;
+}
 ```
 
-## Debugging
+## Error Codes
 
-BonAmi supports several debugging options:
-- Set log level in ENV:Bonami/config (0-3)
-- Use bactl with -v for verbose output
-- Monitor network interface status
-- Check service conflict resolution
+- `BA_OK`: Operation successful
+- `BA_NOMEM`: Out of memory
+- `BA_INVALID`: Invalid parameter
+- `BA_DUPLICATE`: Service already registered
+- `BA_NOTFOUND`: Service not found
+- `BA_TIMEOUT`: Operation timed out
+- `BA_NETWORK`: Network error
+- `BA_VERSION`: Version mismatch
+
+## Thread Safety
+
+The library is designed to be thread-safe and reentrant. The daemon uses semaphores to protect shared resources and ensure thread-safe operations.
+
+## Memory Management
+
+The daemon uses memory pools for long-lived objects, while the library uses standard memory allocation for ephemeral objects like messages.
+
+## Version History
+
+- 40.0: Initial release
+  - Basic service registration and discovery
+  - TXT record support
+  - AmigaOS 3.x and 4.x support
+  - Thread-safe operations
+  - Memory pool management
 
 ## License
 
-TBD
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ## Contributing
 
-1. Fork the repository
-2. Create your feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
-
-## Acknowledgments
-
-- Depends on Roadshow TCP/IP stack
+Contributions are welcome! Please feel free to submit a Pull Request.

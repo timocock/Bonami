@@ -17,7 +17,7 @@
 #include "/include/dns.h"
 
 /* Version string */
-static const char version[] = "$VER: bonamid 40.0 (01.01.2024)";
+static const char version[] = "$VER: Bonami 40.0 (01.01.2024)";
 
 /* Constants */
 #define MDNS_PORT 5353

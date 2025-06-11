@@ -150,7 +150,7 @@ struct Library *OpenLibrary(void)
     }
     
     /* Find daemon port */
-    base->daemonPort = FindPort("bonamid");
+    base->daemonPort = FindPort("Bonami");
     if (!base->daemonPort) {
         DeleteMsgPort(base->replyPort);
         FreeVec(base);

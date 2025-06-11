@@ -28,8 +28,8 @@ CTL_OBJS = $(CTL_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 # Targets
 LIB_TARGET = $(LIB_DIR)/bonami.library
-DAEMON_TARGET = $(BIN_DIR)/bonamid
-CTL_TARGET = $(BIN_DIR)/bactl
+DAEMON_TARGET = $(BIN_DIR)/Bonami
+CTL_TARGET = $(BIN_DIR)/BACtl
 
 # Default target
 all: directories $(LIB_TARGET) $(DAEMON_TARGET) $(CTL_TARGET)
