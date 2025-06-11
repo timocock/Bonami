@@ -13,8 +13,14 @@ A simple command-line tool that searches for Samba shares on the local network u
 
 ### Usage
 
+#### C Program
 ```
 find_samba [TIMEOUT=n]
+```
+
+#### AmigaDOS Script
+```
+find_samba.sh [TIMEOUT=n]
 ```
 
 Where:
@@ -110,6 +116,30 @@ BAStopDiscovery(base, "_smb._tcp.local");
 BAClose(base);
 CloseLibrary(bonamiBase);
 ```
+
+### AmigaDOS Script
+
+The `find_samba.sh` script demonstrates how to achieve the same result using the `bactl` command-line tool:
+
+```amigados
+; Start discovery
+bactl discover _smb._tcp.local
+
+; Wait for responses
+WAIT $TIMEOUT
+
+; List found services
+bactl list _smb._tcp.local
+
+; Stop discovery
+bactl stop _smb._tcp.local
+```
+
+The script:
+- Uses AmigaDOS command-line argument parsing
+- Provides the same timeout functionality
+- Uses the same service type (_smb._tcp.local)
+- Demonstrates the simplicity of using bactl
 
 ### Error Handling
 
