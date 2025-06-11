@@ -19,17 +19,20 @@ BIN_DIR = bin
 # Source files
 LIB_SRCS = $(SRC_DIR)/bonami_lib.c
 DAEMON_SRCS = $(SRC_DIR)/bonami.c
+CTL_SRCS = $(SRC_DIR)/bonami_cmd.c
 
 # Object files
 LIB_OBJS = $(LIB_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 DAEMON_OBJS = $(DAEMON_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+CTL_OBJS = $(CTL_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 # Targets
 LIB_TARGET = $(LIB_DIR)/bonami.library
 DAEMON_TARGET = $(BIN_DIR)/bonamid
+CTL_TARGET = $(BIN_DIR)/bactl
 
 # Default target
-all: directories $(LIB_TARGET) $(DAEMON_TARGET)
+all: directories $(LIB_TARGET) $(DAEMON_TARGET) $(CTL_TARGET)
 
 # Create directories
 directories:
@@ -43,12 +46,20 @@ $(LIB_TARGET): $(LIB_OBJS)
 $(DAEMON_TARGET): $(DAEMON_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(DAEMON_OBJS) -ldebug
 
+# Build control utility
+$(CTL_TARGET): $(CTL_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $(CTL_OBJS) -ldebug
+
 # Compile library objects
 $(OBJ_DIR)/bonami_lib.o: $(SRC_DIR)/bonami_lib.c $(INCLUDE_DIR)/bonami.h
 	$(CC) $(CFLAGS) -I$(INCLUDE_DIR) -c $< -o $@
 
 # Compile daemon objects
 $(OBJ_DIR)/bonami.o: $(SRC_DIR)/bonami.c $(INCLUDE_DIR)/bonami.h
+	$(CC) $(CFLAGS) -I$(INCLUDE_DIR) -c $< -o $@
+
+# Compile control utility objects
+$(OBJ_DIR)/bonami_cmd.o: $(SRC_DIR)/bonami_cmd.c $(INCLUDE_DIR)/bonami.h
 	$(CC) $(CFLAGS) -I$(INCLUDE_DIR) -c $< -o $@
 
 # Clean
@@ -59,5 +70,6 @@ clean:
 install: all
 	cp $(LIB_TARGET) LIBS:
 	cp $(DAEMON_TARGET) C:
+	cp $(CTL_TARGET) C:
 
 .PHONY: all clean install directories 
