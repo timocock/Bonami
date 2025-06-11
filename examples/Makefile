@@ -1,0 +1,14 @@
+CC = vc
+CFLAGS = -c99 -O2 -Wall -I../include
+LDFLAGS = -lamiga
+
+all: find_samba
+
+find_samba: find_samba.o
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+find_samba.o: find_samba.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+clean:
+	rm -f find_samba find_samba.o 
