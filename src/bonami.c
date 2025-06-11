@@ -31,13 +31,6 @@
 #define ANNOUNCE_WAIT 1000 /* 1s between announcements */
 #define ANNOUNCE_NUM 3     /* Number of announcements */
 
-/* Service types */
-#define SERVICE_TYPE_SMB "_smb._tcp.local"
-#define SERVICE_TYPE_HTTP "_http._tcp.local"
-#define SERVICE_TYPE_HTTPS "_https._tcp.local"
-#define SERVICE_TYPE_SSH "_ssh._tcp.local"
-#define SERVICE_TYPE_FTP "_ftp._tcp.local"
-
 /* Log levels */
 #define LOG_ERROR 0
 #define LOG_WARN  1
@@ -62,7 +55,6 @@ struct InterfaceState {
     struct List *services;  /* Services on this interface */
     struct List *probes;    /* Services being probed */
     struct List *announces; /* Services being announced */
-    char name[32];         /* Interface name */
 };
 
 /* Cache entry */
@@ -94,6 +86,30 @@ struct BonamiDiscoveryNode {
     struct BonamiDiscovery discovery;
     struct Task *task;
     BOOL running;
+};
+
+/* Service discovery callback structure */
+struct BonamiServiceCallback {
+    struct Node node;
+    char type[256];           /* Service type to discover */
+    void (*callback)(struct BonamiService *service, void *userData);
+    void *userData;
+    BOOL active;
+};
+
+/* Service structure */
+struct BonamiService {
+    char name[256];          /* Service instance name */
+    char type[256];          /* Service type (e.g., _smb._tcp.local) */
+    char hostname[256];      /* Hostname from SRV record */
+    UWORD port;             /* Port from SRV record */
+    struct {
+        UBYTE *data;        /* TXT record data */
+        ULONG length;       /* TXT record length */
+    } txt;
+    struct in_addr addr;    /* Resolved IP address */
+    LONG ttl;              /* Time to live */
+    LONG lastUpdate;       /* Last update timestamp */
 };
 
 /* Global state */
@@ -139,7 +155,6 @@ static LONG validateServiceName(const char *name);
 static LONG validateServiceType(const char *type);
 static void logMessage(LONG level, const char *format, ...);
 static LONG loadConfig(void);
-static LONG saveConfig(void);
 static LONG initInterfaces(void);
 static void cleanupInterfaces(void);
 static LONG checkInterface(struct InterfaceState *iface);
@@ -154,112 +169,12 @@ static LONG checkServiceConflict(const char *name, const char *type);
 static void startServiceProbing(struct InterfaceState *iface, struct BonamiService *service);
 static void startServiceAnnouncement(struct InterfaceState *iface, struct BonamiService *service);
 static void processServiceStates(struct InterfaceState *iface);
-static void handleSMBService(const struct BonamiService *service, void *userData);
-
-/* Handle SMB service discovery */
-static void handleSMBService(const struct BonamiService *service, void *userData)
-{
-    char command[512];
-    char workgroup[64] = "WORKGROUP";  /* Default workgroup */
-    char *txt;
-    LONG i;
-    
-    /* Extract workgroup from TXT record if available */
-    if (service->txt.data && service->txt.length > 0) {
-        txt = service->txt.data;
-        for (i = 0; i < service->txt.length; i++) {
-            if (strncmp(&txt[i], "workgroup=", 10) == 0) {
-                strncpy(workgroup, &txt[i + 10], sizeof(workgroup) - 1);
-                break;
-            }
-        }
-    }
-    
-    /* Log the discovered service */
-    logMessage(LOG_INFO, "Discovered SMB share: %s on %s (workgroup: %s)",
-               service->name, service->hostname, workgroup);
-    
-    /* Create mount command */
-    sprintf(command, "Mount SMB:%s %s %s %s",
-            service->name,           /* Share name */
-            service->hostname,       /* Server hostname */
-            workgroup,              /* Workgroup */
-            service->port == 0 ? "445" : service->port);  /* Port */
-    
-    /* Log the command that would be executed */
-    logMessage(LOG_INFO, "Mount command: %s", command);
-    
-    /* Note: We don't execute the command here, we just provide the information
-     * The actual mounting should be handled by the client application
-     * This keeps BonAmi focused on service discovery only
-     */
-}
-
-/* Process incoming message */
-static void processMessage(struct BonamiMessage *msg)
-{
-    struct BonamiMessage *reply;
-    struct BonamiServiceNode *service;
-    struct BonamiDiscoveryNode *discovery;
-    LONG result;
-    
-    /* Allocate reply message */
-    reply = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
-    if (!reply) {
-        return;
-    }
-    
-    /* Set up reply */
-    reply->msg.mn_Node.ln_Type = NT_REPLYMSG;
-    reply->msg.mn_ReplyPort = msg->msg.mn_ReplyPort;
-    reply->msg.mn_Length = sizeof(struct BonamiMessage);
-    
-    /* Process message */
-    switch (msg->type) {
-        case BONAMI_MSG_DISCOVER:
-            ObtainSemaphore(&bonami.lock);
-            
-            /* Check if discovery exists */
-            discovery = findDiscovery(msg->data.discover_msg.discovery.type);
-            if (discovery) {
-                reply->type = BONAMI_DUPLICATE;
-            } else {
-                /* Create new discovery */
-                discovery = AllocMem(sizeof(struct BonamiDiscoveryNode), MEMF_CLEAR);
-                if (discovery) {
-                    memcpy(&discovery->discovery, &msg->data.discover_msg.discovery, 
-                           sizeof(struct BonamiDiscovery));
-                    discovery->running = TRUE;
-                    
-                    /* Set up service-specific handler */
-                    if (strcmp(discovery->discovery.type, SERVICE_TYPE_SMB) == 0) {
-                        discovery->discovery.callback = handleSMBService;
-                    }
-                    
-                    /* Create discovery task */
-                    discovery->task = CreateTask("BonAmi Discovery", 0, 
-                                               discoveryTask, discovery, 4096);
-                    if (discovery->task) {
-                        AddTail(bonami.discoveries, (struct Node *)discovery);
-                        reply->type = BONAMI_OK;
-                    } else {
-                        FreeMem(discovery, sizeof(struct BonamiDiscoveryNode));
-                        reply->type = BONAMI_ERROR;
-                    }
-                } else {
-                    reply->type = BONAMI_NOMEM;
-                }
-            }
-            
-            ReleaseSemaphore(&bonami.lock);
-            break;
-            
-        // ... rest of message handling ...
-    }
-    
-    /* Send reply */
-    PutMsg(msg->msg.mn_ReplyPort, (struct Message *)reply);
-}
+static LONG BonamiAddServiceDiscovery(const char *type, 
+                                    void (*callback)(struct BonamiService *service, void *userData),
+                                    void *userData);
+static LONG BonamiRemoveServiceDiscovery(const char *type);
+static void processDiscoveredService(struct BonamiService *service, 
+                                    struct BonamiServiceCallback *callback);
 
 /* Initialize daemon */
 static LONG initDaemon(void)
@@ -605,4 +520,148 @@ int main(void)
     cleanupDaemon();
     
     return 0;
+}
+
+/* Add service discovery */
+static LONG BonamiAddServiceDiscovery(const char *type, 
+                                     void (*callback)(struct BonamiService *service, void *userData),
+                                     void *userData)
+{
+    struct BonamiServiceCallback *cb;
+    struct BonamiMessage *msg, *reply;
+    
+    /* Validate parameters */
+    if (!type || !callback) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Create callback structure */
+    cb = AllocMem(sizeof(struct BonamiServiceCallback), MEMF_CLEAR);
+    if (!cb) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Initialize callback */
+    strncpy(cb->type, type, sizeof(cb->type) - 1);
+    cb->callback = callback;
+    cb->userData = userData;
+    cb->active = TRUE;
+    
+    /* Create message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        FreeMem(cb, sizeof(struct BonamiServiceCallback));
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->msg.mn_Node.ln_Type = NT_MESSAGE;
+    msg->msg.mn_Length = sizeof(struct BonamiMessage);
+    msg->msg.mn_ReplyPort = CreateMsgPort();
+    if (!msg->msg.mn_ReplyPort) {
+        FreeMem(msg, sizeof(struct BonamiMessage));
+        FreeMem(cb, sizeof(struct BonamiServiceCallback));
+        return BONAMI_ERROR;
+    }
+    
+    msg->type = BONAMI_MSG_DISCOVER;
+    strncpy(msg->data.discover_msg.type, type, sizeof(msg->data.discover_msg.type) - 1);
+    msg->data.discover_msg.callback = cb;
+    
+    /* Send message to daemon */
+    PutMsg(bonami.port, (struct Message *)msg);
+    
+    /* Wait for reply */
+    reply = (struct BonamiMessage *)WaitPort(msg->msg.mn_ReplyPort);
+    if (reply) {
+        LONG result = reply->type;
+        DeleteMsgPort(msg->msg.mn_ReplyPort);
+        FreeMem(msg, sizeof(struct BonamiMessage));
+        return result;
+    }
+    
+    DeleteMsgPort(msg->msg.mn_ReplyPort);
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    return BONAMI_ERROR;
+}
+
+/* Remove service discovery */
+static LONG BonamiRemoveServiceDiscovery(const char *type)
+{
+    struct BonamiMessage *msg, *reply;
+    
+    /* Validate parameters */
+    if (!type) {
+        return BONAMI_BADPARAM;
+    }
+    
+    /* Create message */
+    msg = AllocMem(sizeof(struct BonamiMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BONAMI_NOMEM;
+    }
+    
+    /* Set up message */
+    msg->msg.mn_Node.ln_Type = NT_MESSAGE;
+    msg->msg.mn_Length = sizeof(struct BonamiMessage);
+    msg->msg.mn_ReplyPort = CreateMsgPort();
+    if (!msg->msg.mn_ReplyPort) {
+        FreeMem(msg, sizeof(struct BonamiMessage));
+        return BONAMI_ERROR;
+    }
+    
+    msg->type = BONAMI_MSG_UNDISCOVER;
+    strncpy(msg->data.undiscover_msg.type, type, sizeof(msg->data.undiscover_msg.type) - 1);
+    
+    /* Send message to daemon */
+    PutMsg(bonami.port, (struct Message *)msg);
+    
+    /* Wait for reply */
+    reply = (struct BonamiMessage *)WaitPort(msg->msg.mn_ReplyPort);
+    if (reply) {
+        LONG result = reply->type;
+        DeleteMsgPort(msg->msg.mn_ReplyPort);
+        FreeMem(msg, sizeof(struct BonamiMessage));
+        return result;
+    }
+    
+    DeleteMsgPort(msg->msg.mn_ReplyPort);
+    FreeMem(msg, sizeof(struct BonamiMessage));
+    return BONAMI_ERROR;
+}
+
+/* Process discovered service */
+static void processDiscoveredService(struct BonamiService *service, 
+                                    struct BonamiServiceCallback *callback)
+{
+    /* Check if callback is still active */
+    if (!callback->active) {
+        return;
+    }
+    
+    /* Call user callback */
+    callback->callback(service, callback->userData);
+}
+
+/* Example usage for SMB share discovery */
+void smbShareCallback(struct BonamiService *service, void *userData)
+{
+    char command[512];
+    
+    /* Format mount command */
+    sprintf(command, "mount smb://%s:%d/%s /Mounts/%s",
+            service->hostname,
+            service->port,
+            service->name,
+            service->name);
+    
+    /* Execute command */
+    System(command, 0);
+}
+
+/* Example of how to use it */
+void discoverSMBShares(void)
+{
+    /* Add SMB service discovery */
+    BonamiAddServiceDiscovery("_smb._tcp.local", smbShareCallback, NULL);
 } 
