@@ -14,12 +14,23 @@
 #define BONAMI_VERSION    1
 #define BONAMI_REVISION   0
 
-/* Error codes */
-#define BONAMI_OK         0
-#define BONAMI_ERROR     -1
-#define BONAMI_NOMEM     -2
-#define BONAMI_TIMEOUT   -3
-#define BONAMI_BADPARAM  -4
+/* Protocol-specific error codes */
+#define BONAMI_OK              0   /* Operation successful */
+#define BONAMI_BADPARAM       -1  /* Invalid parameter */
+#define BONAMI_NOMEM          -2  /* Out of memory */
+#define BONAMI_TIMEOUT        -3  /* Operation timed out */
+#define BONAMI_DUPLICATE      -4  /* Service already registered */
+#define BONAMI_NOTFOUND       -5  /* Service not found */
+#define BONAMI_BADTYPE        -6  /* Invalid service type */
+#define BONAMI_BADNAME        -7  /* Invalid service name */
+#define BONAMI_BADPORT        -8  /* Invalid port number */
+#define BONAMI_BADTXT         -9  /* Invalid TXT record */
+#define BONAMI_BADQUERY       -10 /* Invalid DNS query */
+#define BONAMI_BADRESPONSE    -11 /* Invalid DNS response */
+#define BONAMI_NETWORK        -12 /* Network error */
+#define BONAMI_NOTREADY       -13 /* Network not ready */
+#define BONAMI_BUSY           -14 /* Operation in progress */
+#define BONAMI_CANCELLED      -15 /* Operation cancelled */
 
 /* Maximum lengths */
 #define BONAMI_MAX_NAME_LEN    256
@@ -38,8 +49,7 @@ struct BonamiService {
     char name[BONAMI_MAX_NAME_LEN];
     char type[BONAMI_MAX_SERVICE_LEN];
     UWORD port;
-    char txt[BONAMI_MAX_TXT_LEN];
-    ULONG ttl;
+    struct BonamiTXTRecord txt;
 };
 
 /* Structure for service discovery */
@@ -73,6 +83,12 @@ struct BonamiBase {
     struct MsgPort *replyPort;
     struct Task *mainTask;
     ULONG flags;
+};
+
+/* TXT record structure */
+struct BonamiTXTRecord {
+    UBYTE *data;
+    ULONG length;
 };
 
 #ifdef __cplusplus
