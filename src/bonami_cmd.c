@@ -2,10 +2,12 @@
 #include <exec/memory.h>
 #include <exec/libraries.h>
 #include <exec/ports.h>
+#include <exec/semaphores.h>
 #include <dos/dos.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/bsdsocket.h>
+#include <netinet/in.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -23,378 +25,385 @@ struct Command {
 };
 
 /* Forward declarations */
-static LONG cmd_discover(struct RDArgs *args);
-static LONG cmd_register(struct RDArgs *args);
-static LONG cmd_unregister(struct RDArgs *args);
-static LONG cmd_list(struct RDArgs *args);
-static LONG cmd_resolve(struct RDArgs *args);
-static LONG cmd_monitor(struct RDArgs *args);
-static LONG cmd_config(struct RDArgs *args);
-static LONG cmd_status(struct RDArgs *args);
-static void print_usage(const char *cmd);
-static void print_help(void);
+static void printUsage(const struct Command *cmd);
+static void printHelp(void);
+static LONG handleDiscover(struct RDArgs *args);
+static LONG handleRegister(struct RDArgs *args);
+static LONG handleUnregister(struct RDArgs *args);
+static LONG handleList(struct RDArgs *args);
+static LONG handleResolve(struct RDArgs *args);
+static LONG handleMonitor(struct RDArgs *args);
+static LONG handleConfig(struct RDArgs *args);
+static LONG handleStatus(struct RDArgs *args);
 static void handleSignals(void);
 
 /* Command table */
-static struct Command commands[] = {
+static const struct Command commands[] = {
     {
         "discover",
-        "TYPE/K, FILTER/K, TIMEOUT/N",
-        "Discover services of specified type",
-        cmd_discover
+        "TYPE/K,NAME/K,FILTER/K,TIMEOUT/N",
+        "Discover services of a specific type",
+        handleDiscover
     },
     {
         "register",
-        "NAME/K, TYPE/K, PORT/N, TXT/M",
+        "NAME/K,TYPE/K,PORT/N,TXT/M",
         "Register a new service",
-        cmd_register
+        handleRegister
     },
     {
         "unregister",
-        "NAME/K, TYPE/K",
+        "NAME/K,TYPE/K",
         "Unregister a service",
-        cmd_unregister
+        handleUnregister
     },
     {
         "list",
         "TYPE/K",
-        "List discovered services",
-        cmd_list
+        "List all services of a specific type",
+        handleList
     },
     {
         "resolve",
-        "NAME/K, TYPE/K",
-        "Resolve service details",
-        cmd_resolve
+        "NAME/K,TYPE/K",
+        "Resolve a service to its address and port",
+        handleResolve
     },
     {
         "monitor",
-        "NAME/K, TYPE/K, INTERVAL/N, NOTIFY/S",
-        "Monitor service availability",
-        cmd_monitor
+        "NAME/K,TYPE/K,INTERVAL/N,NOTIFY/S",
+        "Monitor a service for changes",
+        handleMonitor
     },
     {
         "config",
         "SET/M",
-        "Get or set configuration",
-        cmd_config
+        "Configure the daemon",
+        handleConfig
     },
     {
         "status",
         "",
         "Show daemon status",
-        cmd_status
+        handleStatus
     },
     { NULL, NULL, NULL, NULL }
 };
 
-/* Handle signals */
-static void handleSignals(void)
-{
-    ULONG signals = Wait(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E);
-    
-    if (signals & SIGBREAKF_CTRL_C) {
-        /* Graceful exit */
-        exit(0);
-    }
-    
-    if (signals & SIGBREAKF_CTRL_D) {
-        /* Toggle debug output */
-        printf("Debug output toggled\n");
-    }
-    
-    if (signals & SIGBREAKF_CTRL_E) {
-        /* Emergency exit */
-        exit(1);
-    }
+/* Print usage for a command */
+static void printUsage(const struct Command *cmd) {
+    printf("Usage: bactl %s\n", cmd->template);
 }
 
-/* Main function */
-int main(int argc, char **argv)
-{
-    struct Library *bonami;
-    struct Command *cmd;
-    struct RDArgs *args;
-    LONG result = RETURN_ERROR;
-    
-    /* Set up signal handling */
-    SetSignal(0, SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E);
-    
-    /* Check arguments */
-    if (argc < 2) {
-        print_help();
-        return RETURN_ERROR;
+/* Print help text */
+static void printHelp(void) {
+    printf("BonAmi mDNS Control Utility (bactl)\n\n");
+    printf("Usage: bactl <command> [options]\n\n");
+    printf("Commands:\n");
+    for (const struct Command *cmd = commands; cmd->name; cmd++) {
+        printf("  %-10s %s\n", cmd->name, cmd->description);
     }
-    
-    /* Open library */
-    bonami = OpenLibrary("bonami.library", 0);
-    if (!bonami) {
-        printf("Error: Could not open bonami.library\n");
-        return RETURN_ERROR;
-    }
-    
-    /* Find command */
-    for (cmd = commands; cmd->name; cmd++) {
-        if (strcmp(argv[1], cmd->name) == 0) {
-            /* Parse arguments */
-            args = ReadArgs(cmd->template, argv + 2, NULL);
-            if (!args) {
-                if (IoErr() == ERROR_REQUIRED_ARG_MISSING) {
-                    print_usage(cmd->name);
-                } else {
-                    printf("Error: Invalid arguments\n");
-                }
-                CloseLibrary(bonami);
-                return RETURN_ERROR;
-            }
-            
-            /* Check for signals before executing command */
-            if (CheckSignal(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E)) {
-                handleSignals();
-            }
-            
-            /* Execute command */
-            result = cmd->handler(args);
-            FreeArgs(args);
-            break;
-        }
-    }
-    
-    /* Unknown command */
-    if (!cmd->name) {
-        printf("Error: Unknown command '%s'\n", argv[1]);
-        print_help();
-    }
-    
-    CloseLibrary(bonami);
-    return result;
+    printf("\nUse 'bactl <command>' for more information about a command.\n");
 }
 
-/* Discover command */
-static LONG cmd_discover(struct RDArgs *args)
-{
-    struct BonamiDiscovery discovery;
-    struct BonamiFilter filter;
+/* Handle discover command */
+static LONG handleDiscover(struct RDArgs *args) {
+    struct BADiscovery discovery;
+    struct List services;
+    struct BAServiceInfo *info;
     LONG timeout = 5;
-    
+    char *type = NULL;
+    char *name = NULL;
+    char *filter = NULL;
+
     /* Get arguments */
-    strncpy(discovery.type, (char *)args->RDA_Args[0], sizeof(discovery.type) - 1);
-    discovery.callback = NULL;
-    discovery.userData = NULL;
-    
-    if (args->RDA_Args[1]) {  /* FILTER */
-        char *key = (char *)args->RDA_Args[1];
-        char *value = strchr(key, '=');
-        if (value) {
-            *value++ = '\0';
-            strncpy(filter.txtKey, key, sizeof(filter.txtKey) - 1);
-            strncpy(filter.txtValue, value, sizeof(filter.txtValue) - 1);
-            filter.wildcard = FALSE;
-        }
+    if (args->RDA_Flags & RDA_TYPE) {
+        type = (char *)args->RDA_Type;
     }
-    
-    if (args->RDA_Args[2]) {  /* TIMEOUT */
-        timeout = *(LONG *)args->RDA_Args[2];
+    if (args->RDA_Flags & RDA_NAME) {
+        name = (char *)args->RDA_Name;
     }
-    
-    /* Start discovery */
-    LONG result = BonamiStartDiscovery(&discovery);
-    if (result != BONAMI_OK) {
-        printf("Error: Failed to start discovery (%ld)\n", result);
+    if (args->RDA_Flags & RDA_FILTER) {
+        filter = (char *)args->RDA_FILTER;
+    }
+    if (args->RDA_Flags & RDA_TIMEOUT) {
+        timeout = *(LONG *)args->RDA_TIMEOUT;
+    }
+
+    /* Check required arguments */
+    if (!type) {
+        printf("Error: TYPE argument is required\n");
+        printUsage(&commands[0]);
         return RETURN_ERROR;
     }
-    
+
+    /* Initialize discovery */
+    memset(&discovery, 0, sizeof(discovery));
+    strncpy(discovery.type, type, BA_MAX_SERVICE_LEN - 1);
+    discovery.services = &services;
+    NewList(discovery.services);
+
+    /* Start discovery */
+    if (BAStartDiscovery(&discovery) != BA_OK) {
+        printf("Error: Failed to start discovery\n");
+        return RETURN_ERROR;
+    }
+
     /* Wait for timeout */
     Delay(timeout * 50);
-    
+
     /* Stop discovery */
-    BonamiStopDiscovery(&discovery);
+    BAStopDiscovery(&discovery);
+
+    /* Print results */
+    printf("Discovered services:\n");
+    for (info = (struct BAServiceInfo *)services.lh_Head; info->node.ln_Succ; info = (struct BAServiceInfo *)info->node.ln_Succ) {
+        printf("  %s (%s) - %s:%d\n", info->name, info->type, inet_ntoa(*(struct in_addr *)&info->ip), info->port);
+    }
+
     return RETURN_OK;
 }
 
-/* Register command */
-static LONG cmd_register(struct RDArgs *args)
-{
-    struct BonamiService service;
-    struct BonamiTXTRecord *txt = NULL;
-    struct BonamiTXTRecord **txt_ptr = &txt;
-    char **txt_args;
-    
+/* Handle register command */
+static LONG handleRegister(struct RDArgs *args) {
+    struct BAService service;
+    struct BATXTRecord *txt = NULL;
+    char *name = NULL;
+    char *type = NULL;
+    LONG port = 0;
+    char **txtArgs = NULL;
+    LONG numTxtArgs = 0;
+
     /* Get arguments */
-    strncpy(service.name, (char *)args->RDA_Args[0], sizeof(service.name) - 1);
-    strncpy(service.type, (char *)args->RDA_Args[1], sizeof(service.type) - 1);
-    service.port = *(LONG *)args->RDA_Args[2];
-    service.txt = NULL;
-    
-    /* Parse TXT records */
-    txt_args = (char **)args->RDA_Args[3];
-    while (*txt_args) {
-        char *key = *txt_args;
+    if (args->RDA_Flags & RDA_NAME) {
+        name = (char *)args->RDA_NAME;
+    }
+    if (args->RDA_Flags & RDA_TYPE) {
+        type = (char *)args->RDA_TYPE;
+    }
+    if (args->RDA_Flags & RDA_PORT) {
+        port = *(LONG *)args->RDA_PORT;
+    }
+    if (args->RDA_Flags & RDA_TXT) {
+        txtArgs = (char **)args->RDA_TXT;
+        numTxtArgs = args->RDA_TXT_Count;
+    }
+
+    /* Check required arguments */
+    if (!name || !type || !port) {
+        printf("Error: NAME, TYPE, and PORT arguments are required\n");
+        printUsage(&commands[1]);
+        return RETURN_ERROR;
+    }
+
+    /* Initialize service */
+    memset(&service, 0, sizeof(service));
+    strncpy(service.name, name, BA_MAX_NAME_LEN - 1);
+    strncpy(service.type, type, BA_MAX_SERVICE_LEN - 1);
+    service.port = port;
+
+    /* Add TXT records */
+    for (LONG i = 0; i < numTxtArgs; i++) {
+        char *key = txtArgs[i];
         char *value = strchr(key, '=');
         if (value) {
             *value++ = '\0';
-            struct BonamiTXTRecord *new_txt = BonamiCreateTXTRecord(key, value);
-            if (new_txt) {
-                *txt_ptr = new_txt;
-                txt_ptr = &new_txt->next;
+            struct BATXTRecord *newTxt = BACreateTXTRecord(key, value);
+            if (newTxt) {
+                newTxt->next = txt;
+                txt = newTxt;
             }
         }
-        txt_args++;
     }
-    
+    service.txt = txt;
+
     /* Register service */
-    LONG result = BonamiRegisterService(&service);
-    
-    /* Clean up */
-    while (txt) {
-        struct BonamiTXTRecord *next = txt->next;
-        BonamiFreeTXTRecord(txt);
-        txt = next;
-    }
-    
-    if (result != BONAMI_OK) {
-        printf("Error: Failed to register service (%ld)\n", result);
+    if (BARegisterService(&service) != BA_OK) {
+        printf("Error: Failed to register service\n");
+        BAFreeTXTRecord(txt);
         return RETURN_ERROR;
     }
-    
+
+    printf("Service registered successfully\n");
+    BAFreeTXTRecord(txt);
     return RETURN_OK;
 }
 
-/* Unregister command */
-static LONG cmd_unregister(struct RDArgs *args)
-{
-    LONG result = BonamiUnregisterService(
-        (char *)args->RDA_Args[0],  /* NAME */
-        (char *)args->RDA_Args[1]   /* TYPE */
-    );
-    
-    if (result != BONAMI_OK) {
-        printf("Error: Failed to unregister service (%ld)\n", result);
+/* Handle unregister command */
+static LONG handleUnregister(struct RDArgs *args) {
+    char *name = NULL;
+    char *type = NULL;
+
+    /* Get arguments */
+    if (args->RDA_Flags & RDA_NAME) {
+        name = (char *)args->RDA_NAME;
+    }
+    if (args->RDA_Flags & RDA_TYPE) {
+        type = (char *)args->RDA_TYPE;
+    }
+
+    /* Check required arguments */
+    if (!name || !type) {
+        printf("Error: NAME and TYPE arguments are required\n");
+        printUsage(&commands[2]);
         return RETURN_ERROR;
     }
-    
+
+    /* Unregister service */
+    if (BAUnregisterService(name, type) != BA_OK) {
+        printf("Error: Failed to unregister service\n");
+        return RETURN_ERROR;
+    }
+
+    printf("Service unregistered successfully\n");
     return RETURN_OK;
 }
 
-/* List command */
-static LONG cmd_list(struct RDArgs *args)
-{
-    struct BonamiService services[256];
-    ULONG numServices = 256;
-    const char *type = (char *)args->RDA_Args[0];
-    int i;
-    
-    LONG result = BonamiGetServices(type, services, &numServices);
-    if (result != BONAMI_OK) {
-        printf("Error: Failed to get services (%ld)\n", result);
+/* Handle list command */
+static LONG handleList(struct RDArgs *args) {
+    struct List services;
+    struct BAServiceInfo *info;
+    char *type = NULL;
+
+    /* Get arguments */
+    if (args->RDA_Flags & RDA_TYPE) {
+        type = (char *)args->RDA_TYPE;
+    }
+
+    /* Check required arguments */
+    if (!type) {
+        printf("Error: TYPE argument is required\n");
+        printUsage(&commands[3]);
         return RETURN_ERROR;
     }
-    
-    /* Print services */
-    for (i = 0; i < numServices; i++) {
-        printf("%s (%s) on %s:%d\n",
-               services[i].name,
-               services[i].type,
-               services[i].hostname,
-               services[i].port);
-        
-        /* Print TXT records */
-        struct BonamiTXTRecord *txt = services[i].txt;
-        while (txt) {
-            printf("  %s=%s\n", txt->key, txt->value);
-            txt = txt->next;
+
+    /* Initialize list */
+    NewList(&services);
+
+    /* Enumerate services */
+    if (BAEnumerateServices(&services, type) != BA_OK) {
+        printf("Error: Failed to enumerate services\n");
+        return RETURN_ERROR;
+    }
+
+    /* Print results */
+    printf("Services of type %s:\n", type);
+    for (info = (struct BAServiceInfo *)services.lh_Head; info->node.ln_Succ; info = (struct BAServiceInfo *)info->node.ln_Succ) {
+        printf("  %s - %s:%d\n", info->name, inet_ntoa(*(struct in_addr *)&info->ip), info->port);
+    }
+
+    return RETURN_OK;
+}
+
+/* Handle resolve command */
+static LONG handleResolve(struct RDArgs *args) {
+    struct BAServiceInfo info;
+    char *name = NULL;
+    char *type = NULL;
+
+    /* Get arguments */
+    if (args->RDA_Flags & RDA_NAME) {
+        name = (char *)args->RDA_NAME;
+    }
+    if (args->RDA_Flags & RDA_TYPE) {
+        type = (char *)args->RDA_TYPE;
+    }
+
+    /* Check required arguments */
+    if (!name || !type) {
+        printf("Error: NAME and TYPE arguments are required\n");
+        printUsage(&commands[4]);
+        return RETURN_ERROR;
+    }
+
+    /* Resolve service */
+    if (BAGetServiceInfo(&info, name, type) != BA_OK) {
+        printf("Error: Failed to resolve service\n");
+        return RETURN_ERROR;
+    }
+
+    printf("Service resolved:\n");
+    printf("  Name: %s\n", info.name);
+    printf("  Type: %s\n", info.type);
+    printf("  Address: %s\n", inet_ntoa(*(struct in_addr *)&info.ip));
+    printf("  Port: %d\n", info.port);
+    printf("  TTL: %d\n", info.ttl);
+
+    return RETURN_OK;
+}
+
+/* Handle monitor command */
+static LONG handleMonitor(struct RDArgs *args) {
+    char *name = NULL;
+    char *type = NULL;
+    LONG interval = 30;
+    BOOL notify = FALSE;
+
+    /* Get arguments */
+    if (args->RDA_Flags & RDA_NAME) {
+        name = (char *)args->RDA_NAME;
+    }
+    if (args->RDA_Flags & RDA_TYPE) {
+        type = (char *)args->RDA_TYPE;
+    }
+    if (args->RDA_Flags & RDA_INTERVAL) {
+        interval = *(LONG *)args->RDA_INTERVAL;
+    }
+    if (args->RDA_Flags & RDA_NOTIFY) {
+        notify = TRUE;
+    }
+
+    /* Check required arguments */
+    if (!name || !type) {
+        printf("Error: NAME and TYPE arguments are required\n");
+        printUsage(&commands[5]);
+        return RETURN_ERROR;
+    }
+
+    /* Monitor service */
+    if (BAMonitorService(name, type, interval, notify) != BA_OK) {
+        printf("Error: Failed to monitor service\n");
+        return RETURN_ERROR;
+    }
+
+    printf("Monitoring service %s of type %s\n", name, type);
+    printf("Press Ctrl-C to stop\n");
+
+    /* Set up signal handling */
+    SetSignal(0, SIGBREAKF_CTRL_C);
+
+    /* Wait for Ctrl-C */
+    while (1) {
+        if (SetSignal(0, 0) & SIGBREAKF_CTRL_C) {
+            break;
         }
+        Delay(50);
     }
-    
+
     return RETURN_OK;
 }
 
-/* Resolve command */
-static LONG cmd_resolve(struct RDArgs *args)
-{
-    struct BonamiService service;
-    
-    LONG result = BonamiResolveService(
-        (char *)args->RDA_Args[0],  /* NAME */
-        (char *)args->RDA_Args[1],  /* TYPE */
-        &service
-    );
-    
-    if (result != BONAMI_OK) {
-        printf("Error: Failed to resolve service (%ld)\n", result);
-        return RETURN_ERROR;
-    }
-    
-    /* Print service details */
-    printf("Name: %s\n", service.name);
-    printf("Type: %s\n", service.type);
-    printf("Host: %s\n", service.hostname);
-    printf("Port: %d\n", service.port);
-    
-    /* Print TXT records */
-    struct BonamiTXTRecord *txt = service.txt;
-    while (txt) {
-        printf("TXT: %s=%s\n", txt->key, txt->value);
-        txt = txt->next;
-    }
-    
-    return RETURN_OK;
-}
+/* Handle config command */
+static LONG handleConfig(struct RDArgs *args) {
+    struct BAConfig config;
+    char **setArgs = NULL;
+    LONG numSetArgs = 0;
 
-/* Monitor command */
-static LONG cmd_monitor(struct RDArgs *args)
-{
-    LONG interval = 5;
-    BOOL notifyOffline = FALSE;
-    
-    if (args->RDA_Args[2]) {  /* INTERVAL */
-        interval = *(LONG *)args->RDA_Args[2];
+    /* Get arguments */
+    if (args->RDA_Flags & RDA_SET) {
+        setArgs = (char **)args->RDA_SET;
+        numSetArgs = args->RDA_SET_Count;
     }
-    
-    if (args->RDA_Args[3]) {  /* NOTIFY */
-        notifyOffline = TRUE;
-    }
-    
-    LONG result = BonamiMonitorService(
-        (char *)args->RDA_Args[0],  /* NAME */
-        (char *)args->RDA_Args[1],  /* TYPE */
-        interval,
-        notifyOffline
-    );
-    
-    if (result != BONAMI_OK) {
-        printf("Error: Failed to monitor service (%ld)\n", result);
-        return RETURN_ERROR;
-    }
-    
-    return RETURN_OK;
-}
 
-/* Config command */
-static LONG cmd_config(struct RDArgs *args)
-{
-    struct BonamiConfig config;
-    char **set_args;
-    
     /* Get current config */
-    LONG result = BonamiGetConfig(&config);
-    if (result != BONAMI_OK) {
-        printf("Error: Failed to get configuration (%ld)\n", result);
+    if (BAGetConfig(&config) != BA_OK) {
+        printf("Error: Failed to get current configuration\n");
         return RETURN_ERROR;
     }
-    
-    if (!args->RDA_Args[0]) {  /* No SET arguments */
-        printf("Discovery Timeout: %ld seconds\n", config.discoveryTimeout);
-        printf("Resolve Timeout: %ld seconds\n", config.resolveTimeout);
-        printf("TTL: %ld seconds\n", config.ttl);
-        printf("Auto Reconnect: %s\n", config.autoReconnect ? "Yes" : "No");
-        return RETURN_OK;
-    }
-    
-    /* Parse SET arguments */
-    set_args = (char **)args->RDA_Args[0];
-    while (*set_args) {
-        char *key = *set_args;
+
+    /* Update config */
+    for (LONG i = 0; i < numSetArgs; i++) {
+        char *key = setArgs[i];
         char *value = strchr(key, '=');
         if (value) {
             *value++ = '\0';
@@ -405,73 +414,114 @@ static LONG cmd_config(struct RDArgs *args)
             } else if (strcmp(key, "ttl") == 0) {
                 config.ttl = atoi(value);
             } else if (strcmp(key, "auto-reconnect") == 0) {
-                config.autoReconnect = strcmp(value, "yes") == 0;
+                config.autoReconnect = (strcmp(value, "true") == 0);
             }
         }
-        set_args++;
     }
-    
+
     /* Set new config */
-    result = BonamiSetConfig(&config);
-    if (result != BONAMI_OK) {
-        printf("Error: Failed to set configuration (%ld)\n", result);
+    if (BASetConfig(&config) != BA_OK) {
+        printf("Error: Failed to set configuration\n");
         return RETURN_ERROR;
     }
-    
+
+    printf("Configuration updated successfully\n");
     return RETURN_OK;
 }
 
-/* Status command */
-static LONG cmd_status(struct RDArgs *args)
-{
-    struct BonamiInterface interfaces[256];
-    ULONG numInterfaces = 256;
-    int i;
-    
+/* Handle status command */
+static LONG handleStatus(struct RDArgs *args) {
+    struct BAConfig config;
+    struct BAInterface interfaces[MAX_INTERFACES];
+    ULONG numInterfaces = MAX_INTERFACES;
+
+    /* Get configuration */
+    if (BAGetConfig(&config) != BA_OK) {
+        printf("Error: Failed to get configuration\n");
+        return RETURN_ERROR;
+    }
+
     /* Get interfaces */
-    LONG result = BonamiGetInterfaces(interfaces, &numInterfaces);
-    if (result != BONAMI_OK) {
-        printf("Error: Failed to get interfaces (%ld)\n", result);
+    if (BAGetInterfaces(interfaces, &numInterfaces) != BA_OK) {
+        printf("Error: Failed to get interfaces\n");
         return RETURN_ERROR;
     }
-    
-    /* Print interfaces */
-    printf("Network Interfaces:\n");
-    for (i = 0; i < numInterfaces; i++) {
-        printf("%s: %s %s\n",
-               interfaces[i].name,
-               interfaces[i].up ? "UP" : "DOWN",
-               interfaces[i].preferred ? "(Preferred)" : "");
+
+    /* Print status */
+    printf("BonAmi mDNS Daemon Status\n\n");
+    printf("Configuration:\n");
+    printf("  Discovery Timeout: %d seconds\n", config.discoveryTimeout);
+    printf("  Resolve Timeout: %d seconds\n", config.resolveTimeout);
+    printf("  TTL: %d seconds\n", config.ttl);
+    printf("  Auto Reconnect: %s\n", config.autoReconnect ? "enabled" : "disabled");
+    printf("\nInterfaces:\n");
+    for (ULONG i = 0; i < numInterfaces; i++) {
+        printf("  %s: %s (%s)\n", interfaces[i].name,
+               inet_ntoa(interfaces[i].addr),
+               interfaces[i].up ? "up" : "down");
     }
-    
+
     return RETURN_OK;
 }
 
-/* Print command usage */
-static void print_usage(const char *cmd)
-{
-    struct Command *c;
-    
-    for (c = commands; c->name; c++) {
-        if (strcmp(c->name, cmd) == 0) {
-            printf("Usage: bactl %s %s\n", c->name, c->template);
-            return;
+/* Handle signals */
+static void handleSignals(void) {
+    ULONG signals = SetSignal(0, 0);
+    if (signals & SIGBREAKF_CTRL_C) {
+        /* Graceful exit */
+        exit(0);
+    } else if (signals & SIGBREAKF_CTRL_D) {
+        /* Toggle debug output */
+        printf("Debug output toggled\n");
+    } else if (signals & SIGBREAKF_CTRL_E) {
+        /* Emergency exit */
+        exit(1);
+    }
+}
+
+/* Main function */
+int main(int argc, char **argv) {
+    struct RDArgs *args;
+    const struct Command *cmd;
+    LONG result = RETURN_OK;
+
+    /* Set up signal handling */
+    SetSignal(0, SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E);
+
+    /* Check arguments */
+    if (argc < 2) {
+        printHelp();
+        return RETURN_OK;
+    }
+
+    /* Find command */
+    for (cmd = commands; cmd->name; cmd++) {
+        if (strcmp(cmd->name, argv[1]) == 0) {
+            break;
         }
     }
-}
 
-/* Print help */
-static void print_help(void)
-{
-    struct Command *c;
-    
-    printf("BonAmi mDNS Control Utility (bactl)\n\n");
-    printf("Usage: bactl <command> [options]\n\n");
-    printf("Commands:\n");
-    
-    for (c = commands; c->name; c++) {
-        printf("  %-12s %s\n", c->name, c->description);
+    if (!cmd->name) {
+        printf("Error: Unknown command '%s'\n", argv[1]);
+        printHelp();
+        return RETURN_ERROR;
     }
-    
-    printf("\nUse 'bactl <command>' for more information about a command.\n");
+
+    /* Parse arguments */
+    args = ReadArgs(cmd->template, argv + 2, NULL);
+    if (!args) {
+        if (IoErr() == ERROR_REQUIRED_ARG_MISSING) {
+            printUsage(cmd);
+        } else {
+            printf("Error: Invalid arguments\n");
+        }
+        return RETURN_ERROR;
+    }
+
+    /* Execute command */
+    result = cmd->handler(args);
+
+    /* Cleanup */
+    FreeArgs(args);
+    return result;
 } 

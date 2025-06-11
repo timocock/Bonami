@@ -16,73 +16,73 @@
 #define BONAMI_REVISION   0
 
 /* Protocol-specific error codes */
-#define BONAMI_OK              0   /* Operation successful */
-#define BONAMI_BADPARAM       -1  /* Invalid parameter */
-#define BONAMI_NOMEM          -2  /* Out of memory */
-#define BONAMI_TIMEOUT        -3  /* Operation timed out */
-#define BONAMI_DUPLICATE      -4  /* Service already registered */
-#define BONAMI_NOTFOUND       -5  /* Service not found */
-#define BONAMI_BADTYPE        -6  /* Invalid service type */
-#define BONAMI_BADNAME        -7  /* Invalid service name */
-#define BONAMI_BADPORT        -8  /* Invalid port number */
-#define BONAMI_BADTXT         -9  /* Invalid TXT record */
-#define BONAMI_BADQUERY       -10 /* Invalid DNS query */
-#define BONAMI_BADRESPONSE    -11 /* Invalid DNS response */
-#define BONAMI_NETWORK        -12 /* Network error */
-#define BONAMI_NOTREADY       -13 /* Network not ready */
-#define BONAMI_BUSY           -14 /* Operation in progress */
-#define BONAMI_CANCELLED      -15 /* Operation cancelled */
+#define BA_OK              0   /* Operation successful */
+#define BA_BADPARAM       -1  /* Invalid parameter */
+#define BA_NOMEM          -2  /* Out of memory */
+#define BA_TIMEOUT        -3  /* Operation timed out */
+#define BA_DUPLICATE      -4  /* Service already registered */
+#define BA_NOTFOUND       -5  /* Service not found */
+#define BA_BADTYPE        -6  /* Invalid service type */
+#define BA_BADNAME        -7  /* Invalid service name */
+#define BA_BADPORT        -8  /* Invalid port number */
+#define BA_BADTXT         -9  /* Invalid TXT record */
+#define BA_BADQUERY       -10 /* Invalid DNS query */
+#define BA_BADRESPONSE    -11 /* Invalid DNS response */
+#define BA_NETWORK        -12 /* Network error */
+#define BA_NOTREADY       -13 /* Network not ready */
+#define BA_BUSY           -14 /* Operation in progress */
+#define BA_CANCELLED      -15 /* Operation cancelled */
 
 /* Maximum lengths */
-#define BONAMI_MAX_NAME_LEN    256
-#define BONAMI_MAX_SERVICE_LEN 64
-#define BONAMI_MAX_TXT_LEN     256
-#define BONAMI_MAX_RECORDS     32
+#define BA_MAX_NAME_LEN    256
+#define BA_MAX_SERVICE_LEN 64
+#define BA_MAX_TXT_LEN     256
+#define BA_MAX_RECORDS     32
 
 /* Service types */
-#define BONAMI_SERVICE_HTTP    "_http._tcp"
-#define BONAMI_SERVICE_FTP     "_ftp._tcp"
-#define BONAMI_SERVICE_SMB     "_smb._tcp"
-#define BONAMI_SERVICE_AFP     "_afp._tcp"
-#define BONAMI_SERVICE_SSH     "_ssh._tcp"
-#define BONAMI_SERVICE_PRINT   "_printer._tcp"
+#define BA_SERVICE_HTTP    "_http._tcp"
+#define BA_SERVICE_FTP     "_ftp._tcp"
+#define BA_SERVICE_SMB     "_smb._tcp"
+#define BA_SERVICE_AFP     "_afp._tcp"
+#define BA_SERVICE_SSH     "_ssh._tcp"
+#define BA_SERVICE_PRINT   "_printer._tcp"
 
 /* Structure for service registration */
-struct BonamiService {
-    char name[BONAMI_MAX_NAME_LEN];
-    char type[BONAMI_MAX_SERVICE_LEN];
-    char hostname[BONAMI_MAX_NAME_LEN];
+struct BAService {
+    char name[BA_MAX_NAME_LEN];
+    char type[BA_MAX_SERVICE_LEN];
+    char hostname[BA_MAX_NAME_LEN];
     struct in_addr addr;
     UWORD port;
-    struct BonamiTXTRecord *txt;
+    struct BATXTRecord *txt;
 };
 
 /* Structure for service discovery */
-struct BonamiDiscovery {
-    char type[BONAMI_MAX_SERVICE_LEN];
-    struct List *services; /* List of BonamiServiceInfo */
+struct BADiscovery {
+    char type[BA_MAX_SERVICE_LEN];
+    struct List *services; /* List of BAServiceInfo */
     struct SignalSemaphore *lock;
-    void (*callback)(struct BonamiServiceInfo *info, int event); /* Async callback */
+    void (*callback)(struct BAServiceInfo *info, int event); /* Async callback */
 };
 
 /* Structure for discovered service */
-struct BonamiServiceInfo {
+struct BAServiceInfo {
     struct Node node;
-    char name[BONAMI_MAX_NAME_LEN];
-    char type[BONAMI_MAX_SERVICE_LEN];
+    char name[BA_MAX_NAME_LEN];
+    char type[BA_MAX_SERVICE_LEN];
     UWORD port;
-    char txt[BONAMI_MAX_TXT_LEN];
+    char txt[BA_MAX_TXT_LEN];
     ULONG ip;
     ULONG ttl;
 };
 
 /* Event types for callbacks */
-#define BONAMI_EVENT_ADDED    1
-#define BONAMI_EVENT_REMOVED  2
-#define BONAMI_EVENT_UPDATED  3
+#define BA_EVENT_ADDED    1
+#define BA_EVENT_REMOVED  2
+#define BA_EVENT_UPDATED  3
 
 /* Library base structure (internal use) */
-struct BonamiBase {
+struct BABase {
     struct Library lib;
     struct SignalSemaphore lock;
     struct MsgPort *replyPort;
@@ -91,48 +91,48 @@ struct BonamiBase {
 };
 
 /* TXT record structure */
-struct BonamiTXTRecord {
-    char key[BONAMI_MAX_TXT_LEN];
-    char value[BONAMI_MAX_TXT_LEN];
-    struct BonamiTXTRecord *next;
+struct BATXTRecord {
+    char key[BA_MAX_TXT_LEN];
+    char value[BA_MAX_TXT_LEN];
+    struct BATXTRecord *next;
 };
 
 /* Discovery structure */
-struct BonamiDiscovery {
-    char type[BONAMI_MAX_SERVICE_LEN];
-    void (*callback)(struct BonamiService *service, APTR userData);
+struct BADiscovery {
+    char type[BA_MAX_SERVICE_LEN];
+    void (*callback)(struct BAService *service, APTR userData);
     APTR userData;
 };
 
 /* Filter structure */
-struct BonamiFilter {
-    char txtKey[BONAMI_MAX_TXT_LEN];
-    char txtValue[BONAMI_MAX_TXT_LEN];
+struct BAFilter {
+    char txtKey[BA_MAX_TXT_LEN];
+    char txtValue[BA_MAX_TXT_LEN];
     BOOL wildcard;
 };
 
 /* Monitor structure */
-struct BonamiMonitor {
+struct BAMonitor {
     struct Node node;
-    char name[BONAMI_MAX_NAME_LEN];
-    char type[BONAMI_MAX_SERVICE_LEN];
+    char name[BA_MAX_NAME_LEN];
+    char type[BA_MAX_SERVICE_LEN];
     LONG checkInterval;
     BOOL notifyOffline;
     BOOL running;
-    void (*callback)(struct BonamiService *service, APTR userData);
+    void (*callback)(struct BAService *service, APTR userData);
     APTR userData;
 };
 
 /* Batch structure */
-struct BonamiBatch {
-    struct BonamiService *services;
+struct BABatch {
+    struct BAService *services;
     ULONG numServices;
     ULONG maxServices;
 };
 
 /* Interface structure */
-struct BonamiInterface {
-    char name[BONAMI_MAX_NAME_LEN];
+struct BAInterface {
+    char name[BA_MAX_NAME_LEN];
     struct in_addr addr;
     struct in_addr netmask;
     BOOL up;
@@ -140,7 +140,7 @@ struct BonamiInterface {
 };
 
 /* Configuration structure */
-struct BonamiConfig {
+struct BAConfig {
     LONG discoveryTimeout;
     LONG resolveTimeout;
     LONG ttl;
@@ -152,61 +152,61 @@ extern "C" {
 #endif
 
 /* Public API */
-LONG BonamiRegisterService(struct BonamiService *service);
-LONG BonamiUnregisterService(const char *name, const char *type);
-LONG BonamiStartDiscovery(struct BonamiDiscovery *discovery);
-LONG BonamiStopDiscovery(struct BonamiDiscovery *discovery);
-LONG BonamiGetServiceInfo(struct BonamiServiceInfo *info, const char *name, const char *type);
-LONG BonamiEnumerateServices(struct List *services, const char *type);
+LONG BARegisterService(struct BAService *service);
+LONG BAUnregisterService(const char *name, const char *type);
+LONG BAStartDiscovery(struct BADiscovery *discovery);
+LONG BAStopDiscovery(struct BADiscovery *discovery);
+LONG BAGetServiceInfo(struct BAServiceInfo *info, const char *name, const char *type);
+LONG BAEnumerateServices(struct List *services, const char *type);
 
 /* New: Enumerate all service types currently advertised */
-LONG BonamiEnumerateServiceTypes(struct List *types);
+LONG BAEnumerateServiceTypes(struct List *types);
 
 /* New: Query arbitrary DNS record (advanced) */
-LONG BonamiQueryRecord(const char *name, UWORD type, UWORD class, void *result, LONG resultlen);
+LONG BAQueryRecord(const char *name, UWORD type, UWORD class, void *result, LONG resultlen);
 
 /* New: Set async callback for discovery events */
-LONG BonamiSetDiscoveryCallback(struct BonamiDiscovery *discovery, void (*callback)(struct BonamiServiceInfo *info, int event));
+LONG BASetDiscoveryCallback(struct BADiscovery *discovery, void (*callback)(struct BAServiceInfo *info, int event));
 
 /* New: Update TXT record for a registered service */
-LONG BonamiUpdateServiceTXT(const char *name, const char *type, const char *txt);
+LONG BAUpdateServiceTXT(const char *name, const char *type, const char *txt);
 
 /* New: Update/rename a registered service */
-LONG BonamiUpdateService(struct BonamiService *service);
+LONG BAUpdateService(struct BAService *service);
 
 /* New: Resolve a service */
-LONG BonamiResolveService(const char *name, const char *type, struct BonamiService *service);
+LONG BAResolveService(const char *name, const char *type, struct BAService *service);
 
 /* New: Start filtered discovery */
-LONG BonamiStartFilteredDiscovery(const char *type, struct BonamiFilter *filter, void (*callback)(struct BonamiService *service, APTR userData), APTR userData);
+LONG BAStartFilteredDiscovery(const char *type, struct BAFilter *filter, void (*callback)(struct BAService *service, APTR userData), APTR userData);
 
 /* New: Monitor a service */
-LONG BonamiMonitorService(const char *name, const char *type, LONG checkInterval, BOOL notifyOffline);
+LONG BAMonitorService(const char *name, const char *type, LONG checkInterval, BOOL notifyOffline);
 
 /* New: Get services */
-LONG BonamiGetServices(const char *type, struct BonamiService *services, ULONG *numServices);
+LONG BAGetServices(const char *type, struct BAService *services, ULONG *numServices);
 
 /* New: Set configuration */
-LONG BonamiSetConfig(struct BonamiConfig *config);
+LONG BASetConfig(struct BAConfig *config);
 
 /* New: Get configuration */
-LONG BonamiGetConfig(struct BonamiConfig *config);
+LONG BAGetConfig(struct BAConfig *config);
 
 /* New: Get interfaces */
-LONG BonamiGetInterfaces(struct BonamiInterface *interfaces, ULONG *numInterfaces);
+LONG BAGetInterfaces(struct BAInterface *interfaces, ULONG *numInterfaces);
 
 /* New: Set preferred interface */
-LONG BonamiSetPreferredInterface(const char *interface);
+LONG BASetPreferredInterface(const char *interface);
 
 /* New: Register update callback */
-LONG BonamiRegisterUpdateCallback(const char *name, const char *type, void (*callback)(struct BonamiService *service, APTR userData), APTR userData);
+LONG BARegisterUpdateCallback(const char *name, const char *type, void (*callback)(struct BAService *service, APTR userData), APTR userData);
 
 /* New: Unregister update callback */
-LONG BonamiUnregisterUpdateCallback(const char *name, const char *type);
+LONG BAUnregisterUpdateCallback(const char *name, const char *type);
 
 /* TXT record functions */
-struct BonamiTXTRecord *BonamiCreateTXTRecord(const char *key, const char *value);
-void BonamiFreeTXTRecord(struct BonamiTXTRecord *record);
+struct BATXTRecord *BACreateTXTRecord(const char *key, const char *value);
+void BAFreeTXTRecord(struct BATXTRecord *record);
 
 #ifdef __cplusplus
 }
