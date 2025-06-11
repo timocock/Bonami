@@ -383,7 +383,6 @@ static LONG handleResolve(struct RDArgs *args)
 /* Handle monitor command */
 static LONG handleMonitor(struct RDArgs *args)
 {
-    struct BADiscovery discovery;
     LONG result;
     
     /* Get arguments */
@@ -393,19 +392,26 @@ static LONG handleMonitor(struct RDArgs *args)
         return RETURN_ERROR;
     }
     
-    /* Initialize discovery */
-    discovery.type = (char *)args->RDA_TYPE;
-    discovery.callback = discoveryCallback;
-    discovery.userData = NULL;
+    /* Get interval */
+    LONG interval = 30;
+    if (args->RDA_Flags & RDA_INTERVAL) {
+        interval = *(LONG *)args->RDA_INTERVAL;
+    }
     
-    /* Start discovery */
+    /* Get notify flag */
+    BOOL notify = FALSE;
+    if (args->RDA_Flags & RDA_NOTIFY) {
+        notify = TRUE;
+    }
+    
+    /* Start monitoring */
     #ifdef __amigaos4__
-    result = cmd.IBonAmi->BAStartDiscovery(&discovery);
+    result = cmd.IBonAmi->BAMonitorService((char *)args->RDA_NAME, (char *)args->RDA_TYPE, interval, notify);
     #else
-    result = BAStartDiscovery(&discovery);
+    result = BAMonitorService((char *)args->RDA_NAME, (char *)args->RDA_TYPE, interval, notify);
     #endif
     if (result != BA_OK) {
-        printf("Error: Failed to start discovery\n");
+        printf("Error: Failed to start monitoring\n");
         return RETURN_ERROR;
     }
     
@@ -423,26 +429,53 @@ static LONG handleMonitor(struct RDArgs *args)
         Delay(50);
     }
     
-    /* Stop discovery */
-    #ifdef __amigaos4__
-    result = cmd.IBonAmi->BAStopDiscovery(&discovery);
-    #else
-    result = BAStopDiscovery(&discovery);
-    #endif
-    if (result != BA_OK) {
-        printf("Error: Failed to stop discovery\n");
-        return RETURN_ERROR;
-    }
-    
     return RETURN_OK;
 }
 
 /* Handle status command */
 static LONG handleStatus(struct RDArgs *args)
 {
+    struct BAStatus status;
+    struct BAInterface interface;
+    LONG result;
+    
+    /* Get daemon status */
+    #ifdef __amigaos4__
+    result = cmd.IBonAmi->BAGetDaemonStatus(&status);
+    #else
+    result = BAGetDaemonStatus(&status);
+    #endif
+    if (result != BA_OK) {
+        printf("Error: Failed to get daemon status\n");
+        return RETURN_ERROR;
+    }
+    
+    /* Print status */
     printf("BonAmi mDNS Daemon Status\n\n");
     printf("Library Version: 40.0\n");
-    printf("Status: Running\n");
+    printf("Status: Running\n\n");
+    printf("Services: %d\n", status.numServices);
+    printf("Discoveries: %d\n", status.numDiscoveries);
+    printf("Monitors: %d\n", status.numMonitors);
+    printf("Interfaces: %d\n", status.numInterfaces);
+    
+    /* Print interface status */
+    printf("\nInterfaces:\n");
+    for (struct InterfaceNode *iface = (struct InterfaceNode *)daemonState.interfaces.lh_Head;
+         iface->node.ln_Succ;
+         iface = (struct InterfaceNode *)iface->node.ln_Succ) {
+        interface.name = iface->name;
+        #ifdef __amigaos4__
+        result = cmd.IBonAmi->BAGetInterfaceStatus(&interface);
+        #else
+        result = BAGetInterfaceStatus(&interface);
+        #endif
+        if (result == BA_OK) {
+            printf("  %s: %s (%s)\n", interface.name,
+                   inet_ntoa(interface.addr),
+                   interface.up ? "up" : "down");
+        }
+    }
     
     return RETURN_OK;
 }

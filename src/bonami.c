@@ -2159,4 +2159,116 @@ static void FreePooled(APTR memory, ULONG size)
 {
     if (!bonami.memPool || !memory) return;
     FreePooled(bonami.memPool, memory, size);
+}
+
+/* Process monitor message */
+static LONG processMonitorMessage(struct BAMessage *msg)
+{
+    struct MonitorNode *monitor;
+    LONG result = BA_OK;
+    
+    /* Check if monitor already exists */
+    for (monitor = (struct MonitorNode *)bonami.monitors.lh_Head;
+         monitor->node.ln_Succ;
+         monitor = (struct MonitorNode *)monitor->node.ln_Succ) {
+        if (strcmp(monitor->name, msg->data.monitor_msg.name) == 0 &&
+            strcmp(monitor->type, msg->data.monitor_msg.type) == 0) {
+            return BA_EXISTS;
+        }
+    }
+    
+    /* Create monitor node */
+    monitor = AllocPooled(sizeof(struct BAMonitorNode));
+    if (!monitor) {
+        return BA_NOMEM;
+    }
+    
+    /* Initialize monitor */
+    monitor->monitor.name = AllocPooled(strlen(msg->data.monitor_msg.name) + 1);
+    monitor->monitor.type = AllocPooled(strlen(msg->data.monitor_msg.type) + 1);
+    if (!monitor->monitor.name || !monitor->monitor.type) {
+        if (monitor->monitor.name) FreePooled(monitor->monitor.name, strlen(monitor->monitor.name) + 1);
+        if (monitor->monitor.type) FreePooled(monitor->monitor.type, strlen(monitor->monitor.type) + 1);
+        FreePooled(monitor, sizeof(struct BAMonitorNode));
+        return BA_NOMEM;
+    }
+    
+    strcpy(monitor->monitor.name, msg->data.monitor_msg.name);
+    strcpy(monitor->monitor.type, msg->data.monitor_msg.type);
+    monitor->monitor.checkInterval = msg->data.monitor_msg.interval;
+    monitor->monitor.notifyOffline = msg->data.monitor_msg.notify;
+    monitor->monitor.lastCheck = 0;
+    monitor->monitor.state = MONITOR_STATE_ACTIVE;
+    
+    /* Add to list */
+    AddTail(&bonami.monitors, &monitor->node);
+    
+    return result;
+}
+
+/* Process get interface message */
+static LONG processGetInterfaceMessage(struct BAMessage *msg)
+{
+    struct InterfaceNode *iface;
+    LONG result = BA_NOTFOUND;
+    
+    /* Find interface */
+    for (iface = (struct InterfaceNode *)bonami.interfaces.lh_Head;
+         iface->node.ln_Succ;
+         iface = (struct InterfaceNode *)iface->node.ln_Succ) {
+        if (strcmp(iface->name, msg->data.interface_msg.interface->name) == 0) {
+            /* Copy interface info */
+            msg->data.interface_msg.interface->addr = iface->addr;
+            msg->data.interface_msg.interface->up = iface->up;
+            result = BA_OK;
+            break;
+        }
+    }
+    
+    return result;
+}
+
+/* Process get status message */
+static LONG processGetStatusMessage(struct BAMessage *msg)
+{
+    struct ServiceNode *service;
+    struct DiscoveryNode *discovery;
+    struct MonitorNode *monitor;
+    struct BAStatus *status = msg->data.status_msg.status;
+    
+    /* Initialize status */
+    status->numServices = 0;
+    status->numDiscoveries = 0;
+    status->numMonitors = 0;
+    status->numInterfaces = 0;
+    
+    /* Count services */
+    for (service = (struct ServiceNode *)bonami.services.lh_Head;
+         service->node.ln_Succ;
+         service = (struct ServiceNode *)service->node.ln_Succ) {
+        status->numServices++;
+    }
+    
+    /* Count discoveries */
+    for (discovery = (struct DiscoveryNode *)bonami.discoveries.lh_Head;
+         discovery->node.ln_Succ;
+         discovery = (struct DiscoveryNode *)discovery->node.ln_Succ) {
+        status->numDiscoveries++;
+    }
+    
+    /* Count monitors */
+    for (monitor = (struct MonitorNode *)bonami.monitors.lh_Head;
+         monitor->node.ln_Succ;
+         monitor = (struct MonitorNode *)monitor->node.ln_Succ) {
+        status->numMonitors++;
+    }
+    
+    /* Count interfaces */
+    for (struct InterfaceNode *iface = (struct InterfaceNode *)bonami.interfaces.lh_Head;
+         iface->node.ln_Succ;
+         iface = (struct InterfaceNode *)iface->node.ln_Succ) {
+        status->numInterfaces++;
+    }
+    
+    return BA_OK;
 } 

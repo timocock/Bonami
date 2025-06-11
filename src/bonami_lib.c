@@ -1060,4 +1060,109 @@ LONG BAEnumerateServiceTypes(struct List *types)
     }
     
     return BA_OK;
+}
+
+/* Monitor service */
+LONG BAMonitorService(const char *name, const char *type, LONG interval, BOOL notify)
+{
+    struct BAMessage *msg;
+    LONG result;
+    
+    /* Validate parameters */
+    if (!name || !type || interval < 0) {
+        return BA_INVALID;
+    }
+    
+    /* Create message */
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BA_NOMEM;
+    }
+    
+    /* Initialize message */
+    msg->type = BA_MSG_MONITOR;
+    msg->data.monitor_msg.name = name;
+    msg->data.monitor_msg.type = type;
+    msg->data.monitor_msg.interval = interval;
+    msg->data.monitor_msg.notify = notify;
+    
+    /* Send message */
+    #ifdef __amigaos4__
+    result = IBonAmi->BASendMessage(msg);
+    #else
+    result = BASendMessage(msg);
+    #endif
+    
+    /* Free message */
+    FreeVec(msg);
+    
+    return result;
+}
+
+/* Get interface status */
+LONG BAGetInterfaceStatus(struct BAInterface *interface)
+{
+    struct BAMessage *msg;
+    LONG result;
+    
+    /* Validate parameters */
+    if (!interface) {
+        return BA_INVALID;
+    }
+    
+    /* Create message */
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BA_NOMEM;
+    }
+    
+    /* Initialize message */
+    msg->type = BA_MSG_GET_INTERFACE;
+    msg->data.interface_msg.interface = interface;
+    
+    /* Send message */
+    #ifdef __amigaos4__
+    result = IBonAmi->BASendMessage(msg);
+    #else
+    result = BASendMessage(msg);
+    #endif
+    
+    /* Free message */
+    FreeVec(msg);
+    
+    return result;
+}
+
+/* Get daemon status */
+LONG BAGetDaemonStatus(struct BAStatus *status)
+{
+    struct BAMessage *msg;
+    LONG result;
+    
+    /* Validate parameters */
+    if (!status) {
+        return BA_INVALID;
+    }
+    
+    /* Create message */
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BA_NOMEM;
+    }
+    
+    /* Initialize message */
+    msg->type = BA_MSG_GET_STATUS;
+    msg->data.status_msg.status = status;
+    
+    /* Send message */
+    #ifdef __amigaos4__
+    result = IBonAmi->BASendMessage(msg);
+    #else
+    result = BASendMessage(msg);
+    #endif
+    
+    /* Free message */
+    FreeVec(msg);
+    
+    return result;
 } 
