@@ -656,11 +656,12 @@ static void processMessage(struct BAMessage *msg)
     struct BADiscoveryNode *discovery;
     struct BAMonitorNode *monitor;
     struct BAUpdateCallbackNode *callback;
-    LONG result;
+    LONG result = BA_OK;
     
+    /* Process message based on type */
     switch (msg->type) {
         case MSG_REGISTER:
-            /* Validate service */
+            /* Validate service name */
             result = validateServiceName(msg->data.register_msg.service->name);
             if (result != BA_OK) {
                 msg->data.register_msg.result = result;
@@ -668,9 +669,35 @@ static void processMessage(struct BAMessage *msg)
                 return;
             }
             
+            /* Validate service type */
             result = validateServiceType(msg->data.register_msg.service->type);
             if (result != BA_OK) {
                 msg->data.register_msg.result = result;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Validate port */
+            result = validatePort(msg->data.register_msg.service->port);
+            if (result != BA_OK) {
+                msg->data.register_msg.result = result;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Validate TXT records */
+            result = validateTXTRecord(msg->data.register_msg.service->txt);
+            if (result != BA_OK) {
+                msg->data.register_msg.result = result;
+                ReplyMsg((struct Message *)msg);
+                return;
+            }
+            
+            /* Check for duplicate service */
+            service = findService(msg->data.register_msg.service->name,
+                                msg->data.register_msg.service->type);
+            if (service) {
+                msg->data.register_msg.result = BA_DUPLICATE;
                 ReplyMsg((struct Message *)msg);
                 return;
             }
@@ -695,6 +722,9 @@ static void processMessage(struct BAMessage *msg)
             /* Initialize service */
             memcpy(&service->service, msg->data.register_msg.service,
                    sizeof(struct BAService));
+            service->state = 0;  /* Start probing */
+            service->probeCount = 0;
+            service->announceCount = 0;
             
             /* Add to service list */
             AddTail(&bonami.services, (struct Node *)service);
