@@ -101,6 +101,9 @@ struct BADiscoveryNode {
     BOOL running;
 };
 
+/* Command line template */
+static const char *template = "LOG/S,LOGFILE/F,DEBUG/S";
+
 /* Daemon state */
 static struct {
     struct List services;
@@ -113,7 +116,6 @@ static struct {
     BOOL running;
     BOOL debug;
     LONG log_level;
-    BPTR console;
     BPTR log_file;
 } bonami;
 
@@ -216,8 +218,15 @@ static void handleSignals(void) {
 /* Initialize daemon */
 static LONG initDaemon(void)
 {
-    BPTR lock;
-    char log_path[256];
+    struct RDArgs *args;
+    LONG result;
+    
+    /* Parse command line */
+    args = ReadArgs(template, NULL, NULL);
+    if (!args) {
+        printf("Error: Invalid arguments\n");
+        return BA_ERROR;
+    }
     
     /* Initialize lists */
     NewList(&bonami.services);
@@ -230,45 +239,44 @@ static LONG initDaemon(void)
     bonami.running = TRUE;
     bonami.debug = FALSE;
     bonami.log_level = LOG_INFO;
-    bonami.console = NULL;
     bonami.log_file = NULL;
     
-    /* Open console */
-    bonami.console = Open("CON:0/0/640/200/BonAmi Daemon", MODE_NEWFILE);
-    if (!bonami.console) {
-        return BA_ERROR;
+    /* Set debug flag */
+    if (args->RDA_Flags & RDAF_LOG) {
+        bonami.debug = TRUE;
     }
     
-    /* Create log directory */
-    lock = CreateDir("ENV:Bonami/logs");
-    if (!lock) {
-        Close(bonami.console);
-        return BA_ERROR;
-    }
-    UnLock(lock);
-    
-    /* Open log file */
-    snprintf(log_path, sizeof(log_path), "ENV:Bonami/logs/bonamid.log");
-    bonami.log_file = Open(log_path, MODE_NEWFILE);
-    if (!bonami.log_file) {
-        Close(bonami.console);
-        return BA_ERROR;
+    /* Open log file if specified */
+    if (args->RDA_Flags & RDAF_LOGFILE) {
+        bonami.log_file = Open((char *)args->RDA_LOGFILE, MODE_NEWFILE);
+        if (!bonami.log_file) {
+            printf("Error: Failed to open log file\n");
+            FreeArgs(args);
+            return BA_ERROR;
+        }
     }
     
     /* Initialize network */
-    if (initInterfaces() != BA_OK) {
-        Close(bonami.log_file);
-        Close(bonami.console);
-        return BA_ERROR;
+    result = initInterfaces();
+    if (result != BA_OK) {
+        if (bonami.log_file) {
+            Close(bonami.log_file);
+        }
+        FreeArgs(args);
+        return result;
     }
     
     /* Resolve hostname */
-    if (resolveHostname() != BA_OK) {
-        Close(bonami.log_file);
-        Close(bonami.console);
-        return BA_ERROR;
+    result = resolveHostname();
+    if (result != BA_OK) {
+        if (bonami.log_file) {
+            Close(bonami.log_file);
+        }
+        FreeArgs(args);
+        return result;
     }
     
+    FreeArgs(args);
     return BA_OK;
 }
 
@@ -373,12 +381,6 @@ static void cleanupDaemon(void)
     if (bonami.log_file) {
         Close(bonami.log_file);
         bonami.log_file = NULL;
-    }
-    
-    /* Close console */
-    if (bonami.console) {
-        Close(bonami.console);
-        bonami.console = NULL;
     }
     
     /* Cleanup interfaces */
@@ -1635,27 +1637,14 @@ static void logMessage(LONG level, const char *format, ...)
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
     
-    /* Write to console */
-    if (bonami.console) {
-        Write(bonami.console, prefix, strlen(prefix));
-        Write(bonami.console, buffer, strlen(buffer));
-        Write(bonami.console, "\n", 1);
-    }
-    
-    /* Write to log file if enabled */
+    /* Write to log file if specified */
     if (bonami.log_file) {
-        BPTR lock;
-        struct DateStamp ds;
-        
-        /* Get current date */
-        DateStamp(&ds);
-        
-        /* Format timestamp */
-        snprintf(buffer, sizeof(buffer), "%ld.%ld.%ld %s%s\n",
-                ds.ds_Days, ds.ds_Minute, ds.ds_Tick,
-                prefix, buffer);
-        
-        /* Write to file */
+        Write(bonami.log_file, prefix, strlen(prefix));
         Write(bonami.log_file, buffer, strlen(buffer));
+        Write(bonami.log_file, "\n", 1);
+    }
+    /* Otherwise write to stdout if logging enabled */
+    else if (bonami.debug) {
+        printf("%s%s\n", prefix, buffer);
     }
 } 
