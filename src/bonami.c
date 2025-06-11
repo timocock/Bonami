@@ -42,6 +42,8 @@
 #define CONFIG_FILE "ENV:Bonami/config"
 #define PID_FILE "ENV:Bonami/pid"
 #define LOG_FILE "ENV:Bonami/log"
+#define MAX_INTERFACES 16
+#define CACHE_TIMEOUT 120  /* 2 minutes */
 
 /* Log levels */
 #define LOG_ERROR 0
@@ -57,6 +59,25 @@
 #define BONAMI_MSG_QUERY       5
 #define BONAMI_MSG_UPDATE      6
 #define BONAMI_MSG_SHUTDOWN    7
+
+/* Interface state */
+struct InterfaceState {
+    struct in_addr addr;
+    BOOL active;
+    LONG lastCheck;
+    struct List *services;  /* Services on this interface */
+};
+
+/* Cache entry */
+struct CacheEntry {
+    struct Node node;
+    char name[256];
+    WORD type;
+    WORD class;
+    struct DNSRecord record;
+    LONG ttl;
+    LONG expires;
+};
 
 /* Message structure */
 struct BonamiMessage {
@@ -127,15 +148,19 @@ static struct {
     struct Library *exec;
     struct List *services;
     struct List *discoveries;
+    struct List *cache;
     struct SignalSemaphore lock;
     struct MsgPort *port;
     struct Process *mainProc;
     struct Process *networkProc;
     struct Process *discoveryProc;
+    struct InterfaceState interfaces[MAX_INTERFACES];
+    LONG numInterfaces;
     BOOL running;
     BOOL networkReady;
     LONG logLevel;
     LONG logFile;
+    char hostname[256];
 } bonami;
 
 /* DNS query structure */
@@ -168,6 +193,240 @@ static LONG loadConfig(void);
 static void signalHandler(LONG sig);
 static LONG writePIDFile(void);
 static void removePIDFile(void);
+static LONG initInterfaces(void);
+static void cleanupInterfaces(void);
+static LONG checkInterface(struct InterfaceState *iface);
+static void updateInterfaceServices(struct InterfaceState *iface);
+static void addCacheEntry(const char *name, WORD type, WORD class, 
+                         const struct DNSRecord *record, LONG ttl);
+static void removeCacheEntry(const char *name, WORD type, WORD class);
+static struct CacheEntry *findCacheEntry(const char *name, WORD type, WORD class);
+static void cleanupCache(void);
+static LONG resolveHostname(void);
+static LONG checkServiceConflict(const char *name, const char *type);
+
+/* Initialize interfaces */
+static LONG initInterfaces(void)
+{
+    struct ifreq ifr;
+    LONG sock;
+    LONG i;
+    
+    /* Create socket for ioctl */
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        return BONAMI_ERROR;
+    }
+    
+    /* Get interface list */
+    for (i = 0; i < MAX_INTERFACES; i++) {
+        ifr.ifr_ifindex = i;
+        if (ioctl(sock, SIOCGIFNAME, &ifr) < 0) {
+            break;
+        }
+        
+        /* Get interface address */
+        if (ioctl(sock, SIOCGIFADDR, &ifr) < 0) {
+            continue;
+        }
+        
+        /* Initialize interface state */
+        bonami.interfaces[bonami.numInterfaces].addr = 
+            ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr;
+        bonami.interfaces[bonami.numInterfaces].active = FALSE;
+        bonami.interfaces[bonami.numInterfaces].lastCheck = 0;
+        bonami.interfaces[bonami.numInterfaces].services = 
+            AllocMem(sizeof(struct List), MEMF_CLEAR);
+        if (bonami.interfaces[bonami.numInterfaces].services) {
+            NewList(bonami.interfaces[bonami.numInterfaces].services);
+            bonami.numInterfaces++;
+        }
+    }
+    
+    CloseSocket(sock);
+    return BONAMI_OK;
+}
+
+/* Cleanup interfaces */
+static void cleanupInterfaces(void)
+{
+    LONG i;
+    
+    for (i = 0; i < bonami.numInterfaces; i++) {
+        if (bonami.interfaces[i].services) {
+            struct Node *node, *next;
+            for (node = bonami.interfaces[i].services->lh_Head; 
+                 (next = node->ln_Succ); node = next) {
+                Remove(node);
+                FreeMem(node, sizeof(struct BonamiServiceNode));
+            }
+            FreeMem(bonami.interfaces[i].services, sizeof(struct List));
+        }
+    }
+    bonami.numInterfaces = 0;
+}
+
+/* Check interface status */
+static LONG checkInterface(struct InterfaceState *iface)
+{
+    struct ifreq ifr;
+    LONG sock;
+    
+    /* Create socket for ioctl */
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        return BONAMI_ERROR;
+    }
+    
+    /* Get interface flags */
+    ifr.ifr_addr.sa_family = AF_INET;
+    strncpy(ifr.ifr_name, "eth0", IFNAMSIZ);  /* TODO: Get actual interface name */
+    if (ioctl(sock, SIOCGIFFLAGS, &ifr) < 0) {
+        CloseSocket(sock);
+        return BONAMI_ERROR;
+    }
+    
+    /* Check if interface is up */
+    if (ifr.ifr_flags & IFF_UP) {
+        if (!iface->active) {
+            iface->active = TRUE;
+            updateInterfaceServices(iface);
+        }
+    } else {
+        iface->active = FALSE;
+    }
+    
+    CloseSocket(sock);
+    return BONAMI_OK;
+}
+
+/* Update interface services */
+static void updateInterfaceServices(struct InterfaceState *iface)
+{
+    struct BonamiServiceNode *service;
+    
+    /* Update all services on this interface */
+    for (service = (struct BonamiServiceNode *)iface->services->lh_Head;
+         service->node.ln_Succ;
+         service = (struct BonamiServiceNode *)service->node.ln_Succ) {
+        updateServiceRecords(service);
+    }
+}
+
+/* Add cache entry */
+static void addCacheEntry(const char *name, WORD type, WORD class, 
+                         const struct DNSRecord *record, LONG ttl)
+{
+    struct CacheEntry *entry;
+    
+    /* Remove existing entry if any */
+    removeCacheEntry(name, type, class);
+    
+    /* Create new entry */
+    entry = AllocMem(sizeof(struct CacheEntry), MEMF_CLEAR);
+    if (entry) {
+        strncpy(entry->name, name, sizeof(entry->name) - 1);
+        entry->type = type;
+        entry->class = class;
+        memcpy(&entry->record, record, sizeof(struct DNSRecord));
+        entry->ttl = ttl;
+        entry->expires = GetSysTime() + ttl;
+        
+        /* Add to cache */
+        AddTail(bonami.cache, (struct Node *)entry);
+    }
+}
+
+/* Remove cache entry */
+static void removeCacheEntry(const char *name, WORD type, WORD class)
+{
+    struct CacheEntry *entry;
+    
+    entry = findCacheEntry(name, type, class);
+    if (entry) {
+        Remove((struct Node *)entry);
+        FreeMem(entry, sizeof(struct CacheEntry));
+    }
+}
+
+/* Find cache entry */
+static struct CacheEntry *findCacheEntry(const char *name, WORD type, WORD class)
+{
+    struct CacheEntry *entry;
+    
+    for (entry = (struct CacheEntry *)bonami.cache->lh_Head;
+         entry->node.ln_Succ;
+         entry = (struct CacheEntry *)entry->node.ln_Succ) {
+        if (strcmp(entry->name, name) == 0 &&
+            entry->type == type &&
+            entry->class == class) {
+            return entry;
+        }
+    }
+    
+    return NULL;
+}
+
+/* Cleanup cache */
+static void cleanupCache(void)
+{
+    struct CacheEntry *entry;
+    LONG now = GetSysTime();
+    
+    while ((entry = (struct CacheEntry *)bonami.cache->lh_Head)) {
+        if (entry->expires <= now) {
+            Remove((struct Node *)entry);
+            FreeMem(entry, sizeof(struct CacheEntry));
+        } else {
+            break;
+        }
+    }
+}
+
+/* Resolve hostname */
+static LONG resolveHostname(void)
+{
+    struct hostent *host;
+    
+    /* Get hostname */
+    if (gethostname(bonami.hostname, sizeof(bonami.hostname)) < 0) {
+        return BONAMI_ERROR;
+    }
+    
+    /* Resolve hostname */
+    host = gethostbyname(bonami.hostname);
+    if (!host) {
+        return BONAMI_ERROR;
+    }
+    
+    return BONAMI_OK;
+}
+
+/* Check service conflict */
+static LONG checkServiceConflict(const char *name, const char *type)
+{
+    struct BonamiServiceNode *service;
+    LONG i;
+    
+    /* Check all interfaces */
+    for (i = 0; i < bonami.numInterfaces; i++) {
+        if (!bonami.interfaces[i].active) {
+            continue;
+        }
+        
+        /* Check services on this interface */
+        for (service = (struct BonamiServiceNode *)bonami.interfaces[i].services->lh_Head;
+             service->node.ln_Succ;
+             service = (struct BonamiServiceNode *)service->node.ln_Succ) {
+            if (strcmp(service->service.name, name) == 0 &&
+                strcmp(service->service.type, type) == 0) {
+                return BONAMI_CONFLICT;
+            }
+        }
+    }
+    
+    return BONAMI_OK;
+}
 
 /* Initialize daemon */
 static LONG initDaemon(void)
@@ -222,12 +481,14 @@ static LONG initDaemon(void)
     /* Initialize lists */
     bonami.services = AllocMem(sizeof(struct List), MEMF_CLEAR);
     bonami.discoveries = AllocMem(sizeof(struct List), MEMF_CLEAR);
-    if (!bonami.services || !bonami.discoveries) {
+    bonami.cache = AllocMem(sizeof(struct List), MEMF_CLEAR);
+    if (!bonami.services || !bonami.discoveries || !bonami.cache) {
         cleanupDaemon();
         return BONAMI_NOMEM;
     }
     NewList(bonami.services);
     NewList(bonami.discoveries);
+    NewList(bonami.cache);
     
     /* Initialize semaphore */
     InitSemaphore(&bonami.lock);
@@ -239,13 +500,15 @@ static LONG initDaemon(void)
         return result;
     }
     
-    /* Set up signal handling */
-    signal(SIGTERM, signalHandler);
-    signal(SIGINT, signalHandler);
-    signal(SIGHUP, signalHandler);
+    /* Initialize interfaces */
+    result = initInterfaces();
+    if (result != BONAMI_OK) {
+        cleanupDaemon();
+        return result;
+    }
     
-    /* Write PID file */
-    result = writePIDFile();
+    /* Resolve hostname */
+    result = resolveHostname();
     if (result != BONAMI_OK) {
         cleanupDaemon();
         return result;
@@ -382,6 +645,7 @@ static void cleanupDaemon(void)
 {
     struct BonamiServiceNode *service;
     struct BonamiDiscoveryNode *discovery;
+    struct CacheEntry *entry;
     
     /* Stop daemon */
     bonami.running = FALSE;
@@ -400,8 +664,8 @@ static void cleanupDaemon(void)
         bonami.logFile = -1;
     }
     
-    /* Remove PID file */
-    removePIDFile();
+    /* Cleanup interfaces */
+    cleanupInterfaces();
     
     /* Free services */
     if (bonami.services) {
@@ -418,6 +682,14 @@ static void cleanupDaemon(void)
             FreeMem(discovery, sizeof(struct BonamiDiscoveryNode));
         }
         FreeMem(bonami.discoveries, sizeof(struct List));
+    }
+    
+    /* Free cache */
+    if (bonami.cache) {
+        while ((entry = (struct CacheEntry *)RemHead(bonami.cache))) {
+            FreeMem(entry, sizeof(struct CacheEntry));
+        }
+        FreeMem(bonami.cache, sizeof(struct List));
     }
     
     /* Close message port */
@@ -448,78 +720,20 @@ static void cleanupDaemon(void)
 /* Network monitor task */
 static void networkMonitorTask(void)
 {
-    LONG lastStatus = -1;
-    LONG retryCount = 0;
+    LONG i;
     
     while (bonami.running) {
-        LONG status = checkNetworkStatus();
-        
-        if (status != lastStatus) {
-            ObtainSemaphore(&bonami.lock);
-            
-            if (status) {
-                /* Network is up */
-                if (!bonami.networkReady) {
-                    /* Try to create multicast socket */
-                    LONG sock = createMulticastSocket();
-                    if (sock >= 0) {
-                        CloseSocket(sock);
-                        bonami.networkReady = TRUE;
-                        retryCount = 0;
-                    } else {
-                        /* Network might not be fully ready */
-                        if (++retryCount >= 5) {  /* Try 5 times */
-                            bonami.networkReady = TRUE;
-                            retryCount = 0;
-                        }
-                    }
-                }
-            } else {
-                /* Network is down */
-                if (bonami.networkReady) {
-                    bonami.networkReady = FALSE;
-                    retryCount = 0;
-                }
-            }
-            
-            ReleaseSemaphore(&bonami.lock);
-            lastStatus = status;
+        /* Check all interfaces */
+        for (i = 0; i < bonami.numInterfaces; i++) {
+            checkInterface(&bonami.interfaces[i]);
         }
+        
+        /* Cleanup cache */
+        cleanupCache();
         
         /* Check every second */
         Delay(50);
     }
-}
-
-/* Check network status */
-static LONG checkNetworkStatus(void)
-{
-    struct ifreq ifr;
-    LONG sock;
-    
-    /* Create socket */
-    sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        return 0;
-    }
-    
-    /* Get first interface */
-    ifr.ifr_name[0] = '\0';
-    if (ioctl(sock, SIOCGIFNAME, &ifr) < 0) {
-        CloseSocket(sock);
-        return 0;
-    }
-    
-    /* Check interface status */
-    if (ioctl(sock, SIOCGIFFLAGS, &ifr) < 0) {
-        CloseSocket(sock);
-        return 0;
-    }
-    
-    CloseSocket(sock);
-    
-    /* Check if interface is up */
-    return (ifr.ifr_flags & IFF_UP) ? 1 : 0;
 }
 
 /* Process incoming message */
