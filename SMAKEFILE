@@ -3,7 +3,7 @@
 
 # Compiler and flags
 CC = gcc
-CFLAGS = -mcrt=newlib -O2 -Wall -Werror -std=c89 -D__USE_INLINE__ -D__USE_BASETYPE__ -D__amigaos4__ -I./include
+CFLAGS = -mcrt=newlib -O2 -Wall -Werror -std=c89 -D__USE_INLINE__ -D__USE_BASETYPE__ -D__amigaos4__ -I/include
 LDFLAGS = -mcrt=newlib
 
 # Directories
@@ -60,6 +60,6 @@ clean:
 # Install
 install: all
 	cp $(DAEMON_TARGET) $(CTL_TARGET) $(LIB_TARGET) SYS:Utilities/
-	cp $(INCLUDE_DIR)/bonami.h SYS:Developer/include/
+	cp $(INCLUDE_DIR)/bonami.h include:bonami/
 
 .PHONY: all clean install directories 
