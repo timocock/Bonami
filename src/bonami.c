@@ -179,7 +179,7 @@ int main(int argc, char **argv) {
     /* Initialize daemon */
     if (initDaemon() != BA_OK) {
         logMessage(LOG_ERROR, "Failed to initialize daemon\n");
-        return 1;
+        return RETURN_ERROR;
     }
 
     /* Set up signal handling */
@@ -202,7 +202,7 @@ int main(int argc, char **argv) {
 
     /* Cleanup */
     cleanupDaemon();
-    return 0;
+    return RETURN_OK;
 }
 
 /* Handle signals */
@@ -219,7 +219,8 @@ static void handleSignals(void) {
     } else if (signals & SIGBREAKF_CTRL_E) {
         /* Emergency shutdown */
         logMessage(LOG_ERROR, "Received emergency shutdown signal\n");
-        bonami.running = FALSE;
+        cleanupDaemon();
+        exit(RETURN_ERROR);
     }
 }
 

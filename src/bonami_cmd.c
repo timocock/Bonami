@@ -523,13 +523,15 @@ static void handleSignals(void) {
     ULONG signals = SetSignal(0, 0);
     if (signals & SIGBREAKF_CTRL_C) {
         /* Graceful exit */
-        exit(0);
+        cleanupCommand();
+        exit(RETURN_OK);
     } else if (signals & SIGBREAKF_CTRL_D) {
         /* Toggle debug output */
         printf("Debug output toggled\n");
     } else if (signals & SIGBREAKF_CTRL_E) {
         /* Emergency exit */
-        exit(1);
+        cleanupCommand();
+        exit(RETURN_ERROR);
     }
 }
 
