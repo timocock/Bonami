@@ -254,253 +254,315 @@ void ExpungeLibrary(void)
     /* Nothing to do here */
 }
 
-/**
- * BARegisterService - Register a service for advertisement
- * 
- * Registers a service for advertisement on the local network using mDNS.
- * The service will be probed for conflicts before being announced.
- * 
- * @param service Pointer to a BAService structure containing service details
- * @return BA_OK if successful, error code otherwise
- * @see BAService
- */
-LONG BARegisterService(struct BAService *service)
+/* Check if daemon is available */
+static LONG checkDaemon(void)
 {
-    struct BABase *base = (struct BABase *)SysBase->LibNode;
     struct BAMessage *msg;
     LONG result;
     
-    if (!service || !service->name[0] || !service->type[0]) {
-        return BA_BADPARAM;
-    }
-    
-    /* Validate service type */
-    result = validateServiceType(service->type);
-    if (result != BA_OK) {
-        return result;
-    }
-    
-    /* Validate service name */
-    result = validateServiceName(service->name);
-    if (result != BA_OK) {
-        return result;
-    }
-    
-    /* Allocate message */
+    /* Create message */
     msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
     if (!msg) {
         return BA_NOMEM;
     }
     
-    /* Set up message */
-    msg->type = MSG_REGISTER;
-    memcpy(&msg->data.register_msg.service, service, sizeof(struct BAService));
+    /* Initialize message */
+    msg->type = BA_MSG_PING;
     
-    /* Send to daemon */
-    result = sendMessage(base, msg);
-    if (result == BA_OK) {
-        result = waitForReply(base, msg);
-        if (result == BA_OK) {
-            result = msg->data.register_msg.result;
-        }
-    }
+    /* Send message */
+    #ifdef __amigaos4__
+    result = IBonAmi->BASendMessage(msg);
+    #else
+    result = BASendMessage(msg);
+    #endif
     
+    /* Free message */
     FreeVec(msg);
+    
     return result;
 }
 
-/**
- * BAUnregisterService - Unregister a previously registered service
- * 
- * Removes a service from advertisement and cleans up associated resources.
- * 
- * @param name Service instance name
- * @param type Service type (e.g., "_http._tcp.local")
- * @return BA_OK if successful, error code otherwise
- */
+/* Register service */
+LONG BARegisterService(const struct BAService *service)
+{
+    struct BAMessage *msg;
+    LONG result;
+    
+    /* Check daemon */
+    result = checkDaemon();
+    if (result != BA_OK) {
+        return BA_DAEMON_NOT_RUNNING;
+    }
+    
+    /* Validate parameters */
+    if (!service || !service->name || !service->type || service->port <= 0) {
+        return BA_INVALID;
+    }
+    
+    /* Create message */
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BA_NOMEM;
+    }
+    
+    /* Initialize message */
+    msg->type = BA_MSG_REGISTER;
+    msg->data.register_msg.service = *service;
+    
+    /* Send message */
+    #ifdef __amigaos4__
+    result = IBonAmi->BASendMessage(msg);
+    #else
+    result = BASendMessage(msg);
+    #endif
+    
+    /* Free message */
+    FreeVec(msg);
+    
+    return result;
+}
+
+/* Unregister service */
 LONG BAUnregisterService(const char *name, const char *type)
 {
-    struct BABase *base = (struct BABase *)SysBase->LibNode;
     struct BAMessage *msg;
     LONG result;
     
-    if (!name || !type) {
-        return BA_BADPARAM;
-    }
-    
-    /* Allocate message */
-    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
-    if (!msg) {
-        return BA_NOMEM;
-    }
-    
-    /* Set up message */
-    msg->type = MSG_UNREGISTER;
-    strncpy(msg->data.unregister_msg.name, name, sizeof(msg->data.unregister_msg.name) - 1);
-    strncpy(msg->data.unregister_msg.type, type, sizeof(msg->data.unregister_msg.type) - 1);
-    
-    /* Send to daemon */
-    result = sendMessage(base, msg);
-    if (result == BA_OK) {
-        result = waitForReply(base, msg);
-        if (result == BA_OK) {
-            result = msg->data.unregister_msg.result;
-        }
-    }
-    
-    FreeVec(msg);
-    return result;
-}
-
-/**
- * BAStartDiscovery - Start discovering services of a specific type
- * 
- * Initiates service discovery for the specified service type. Results
- * will be added to the provided list structure.
- * 
- * @param discovery Pointer to a BADiscovery structure
- * @return BA_OK if successful, error code otherwise
- * @see BADiscovery
- */
-LONG BAStartDiscovery(struct BADiscovery *discovery)
-{
-    struct BABase *base = (struct BABase *)SysBase->LibNode;
-    struct BAMessage *msg;
-    LONG result;
-    
-    if (!discovery || !discovery->type[0]) {
-        return BA_BADPARAM;
-    }
-    
-    /* Validate service type */
-    result = validateServiceType(discovery->type);
+    /* Check daemon */
+    result = checkDaemon();
     if (result != BA_OK) {
-        return result;
+        return BA_DAEMON_NOT_RUNNING;
     }
     
-    /* Allocate message */
+    /* Validate parameters */
+    if (!name || !type) {
+        return BA_INVALID;
+    }
+    
+    /* Create message */
     msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
     if (!msg) {
         return BA_NOMEM;
     }
     
-    /* Set up message */
-    msg->type = MSG_DISCOVER;
-    strncpy(msg->data.discover_msg.type, discovery->type, sizeof(msg->data.discover_msg.type) - 1);
-    msg->data.discover_msg.services = discovery->services;
+    /* Initialize message */
+    msg->type = BA_MSG_UNREGISTER;
+    msg->data.unregister_msg.name = name;
+    msg->data.unregister_msg.type = type;
     
-    /* Send to daemon */
-    result = sendMessage(base, msg);
-    if (result == BA_OK) {
-        result = waitForReply(base, msg);
-        if (result == BA_OK) {
-            result = msg->data.discover_msg.result;
-        }
-    }
+    /* Send message */
+    #ifdef __amigaos4__
+    result = IBonAmi->BASendMessage(msg);
+    #else
+    result = BASendMessage(msg);
+    #endif
     
+    /* Free message */
     FreeVec(msg);
+    
     return result;
 }
 
-/**
- * BAStopDiscovery - Stop an active service discovery
- * 
- * Stops an ongoing service discovery operation and cleans up resources.
- * 
- * @param discovery Pointer to the BADiscovery structure used in BAStartDiscovery
- * @return BA_OK if successful, error code otherwise
- */
-LONG BAStopDiscovery(struct BADiscovery *discovery)
+/* Start discovery */
+LONG BAStartDiscovery(const struct BADiscovery *discovery)
 {
-    struct BABase *base = (struct BABase *)SysBase->LibNode;
     struct BAMessage *msg;
     LONG result;
     
-    if (!discovery || !discovery->type[0]) {
-        return BA_BADPARAM;
+    /* Check daemon */
+    result = checkDaemon();
+    if (result != BA_OK) {
+        return BA_DAEMON_NOT_RUNNING;
     }
     
-    /* Allocate message */
+    /* Validate parameters */
+    if (!discovery || !discovery->type || !discovery->callback) {
+        return BA_INVALID;
+    }
+    
+    /* Create message */
     msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
     if (!msg) {
         return BA_NOMEM;
     }
     
-    /* Set up message */
-    msg->type = MSG_STOP;
-    strncpy(msg->data.discover_msg.type, discovery->type, sizeof(msg->data.discover_msg.type) - 1);
+    /* Initialize message */
+    msg->type = BA_MSG_DISCOVER;
+    msg->data.discover_msg.discovery = *discovery;
     
-    /* Send to daemon */
-    result = sendMessage(base, msg);
-    if (result == BA_OK) {
-        result = waitForReply(base, msg);
-        if (result == BA_OK) {
-            result = msg->data.discover_msg.result;
-        }
-    }
+    /* Send message */
+    #ifdef __amigaos4__
+    result = IBonAmi->BASendMessage(msg);
+    #else
+    result = BASendMessage(msg);
+    #endif
     
+    /* Free message */
     FreeVec(msg);
+    
     return result;
 }
 
-/**
- * BAMonitorService - Monitor a service for availability changes
- * 
- * Sets up monitoring for a specific service instance. The callback will be
- * called when the service state changes.
- * 
- * @param name Service instance name
- * @param type Service type
- * @param checkInterval Interval between checks in seconds
- * @param notifyOffline Whether to notify when service goes offline
- * @return BA_OK if successful, error code otherwise
- */
-LONG BAMonitorService(const char *name,
-                         const char *type,
-                         LONG checkInterval,
-                         BOOL notifyOffline)
+/* Stop discovery */
+LONG BAStopDiscovery(const struct BADiscovery *discovery)
 {
-    struct BABase *base = (struct BABase *)SysBase->LibNode;
     struct BAMessage *msg;
-    struct BAMonitor *monitor;
+    LONG result;
     
-    if (!name || !type) {
-        return BA_BADPARAM;
+    /* Check daemon */
+    result = checkDaemon();
+    if (result != BA_OK) {
+        return BA_DAEMON_NOT_RUNNING;
     }
     
-    /* Create monitor structure */
-    monitor = AllocPooled(base, sizeof(struct BAMonitor));
-    if (!monitor) {
-        return BA_NOMEM;
+    /* Validate parameters */
+    if (!discovery || !discovery->type) {
+        return BA_INVALID;
     }
     
-    /* Initialize monitor */
-    strncpy(monitor->name, name, sizeof(monitor->name) - 1);
-    strncpy(monitor->type, type, sizeof(monitor->type) - 1);
-    monitor->checkInterval = checkInterval;
-    monitor->notifyOffline = notifyOffline;
-    
-    /* Allocate message */
-    msg = AllocPooled(base, sizeof(struct BAMessage));
+    /* Create message */
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
     if (!msg) {
-        FreePooled(base, monitor, sizeof(struct BAMonitor));
         return BA_NOMEM;
     }
     
-    /* Set up message */
-    msg->type = MSG_MONITOR;
-    memcpy(&msg->data.monitor_msg.monitor, monitor, sizeof(struct BAMonitor));
+    /* Initialize message */
+    msg->type = BA_MSG_STOP_DISCOVER;
+    msg->data.discover_msg.discovery = *discovery;
     
-    /* Send to daemon */
-    LONG result = sendMessage(base, msg);
-    if (result == BA_OK) {
-        /* Add to monitor list */
-        AddTail(base->monitors, (struct Node *)monitor);
-    } else {
-        FreePooled(base, monitor, sizeof(struct BAMonitor));
+    /* Send message */
+    #ifdef __amigaos4__
+    result = IBonAmi->BASendMessage(msg);
+    #else
+    result = BASendMessage(msg);
+    #endif
+    
+    /* Free message */
+    FreeVec(msg);
+    
+    return result;
+}
+
+/* Monitor service */
+LONG BAMonitorService(const char *name, const char *type, LONG interval, BOOL notify)
+{
+    struct BAMessage *msg;
+    LONG result;
+    
+    /* Check daemon */
+    result = checkDaemon();
+    if (result != BA_OK) {
+        return BA_DAEMON_NOT_RUNNING;
     }
     
-    FreePooled(base, msg, sizeof(struct BAMessage));
+    /* Validate parameters */
+    if (!name || !type || interval < 0) {
+        return BA_INVALID;
+    }
+    
+    /* Create message */
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BA_NOMEM;
+    }
+    
+    /* Initialize message */
+    msg->type = BA_MSG_MONITOR;
+    msg->data.monitor_msg.name = name;
+    msg->data.monitor_msg.type = type;
+    msg->data.monitor_msg.interval = interval;
+    msg->data.monitor_msg.notify = notify;
+    
+    /* Send message */
+    #ifdef __amigaos4__
+    result = IBonAmi->BASendMessage(msg);
+    #else
+    result = BASendMessage(msg);
+    #endif
+    
+    /* Free message */
+    FreeVec(msg);
+    
+    return result;
+}
+
+/* Get interface status */
+LONG BAGetInterfaceStatus(struct BAInterface *interface)
+{
+    struct BAMessage *msg;
+    LONG result;
+    
+    /* Check daemon */
+    result = checkDaemon();
+    if (result != BA_OK) {
+        return BA_DAEMON_NOT_RUNNING;
+    }
+    
+    /* Validate parameters */
+    if (!interface) {
+        return BA_INVALID;
+    }
+    
+    /* Create message */
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BA_NOMEM;
+    }
+    
+    /* Initialize message */
+    msg->type = BA_MSG_GET_INTERFACE;
+    msg->data.interface_msg.interface = interface;
+    
+    /* Send message */
+    #ifdef __amigaos4__
+    result = IBonAmi->BASendMessage(msg);
+    #else
+    result = BASendMessage(msg);
+    #endif
+    
+    /* Free message */
+    FreeVec(msg);
+    
+    return result;
+}
+
+/* Get daemon status */
+LONG BAGetDaemonStatus(struct BAStatus *status)
+{
+    struct BAMessage *msg;
+    LONG result;
+    
+    /* Check daemon */
+    result = checkDaemon();
+    if (result != BA_OK) {
+        return BA_DAEMON_NOT_RUNNING;
+    }
+    
+    /* Validate parameters */
+    if (!status) {
+        return BA_INVALID;
+    }
+    
+    /* Create message */
+    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
+    if (!msg) {
+        return BA_NOMEM;
+    }
+    
+    /* Initialize message */
+    msg->type = BA_MSG_GET_STATUS;
+    msg->data.status_msg.status = status;
+    
+    /* Send message */
+    #ifdef __amigaos4__
+    result = IBonAmi->BASendMessage(msg);
+    #else
+    result = BASendMessage(msg);
+    #endif
+    
+    /* Free message */
+    FreeVec(msg);
+    
     return result;
 }
 
@@ -1060,109 +1122,4 @@ LONG BAEnumerateServiceTypes(struct List *types)
     }
     
     return BA_OK;
-}
-
-/* Monitor service */
-LONG BAMonitorService(const char *name, const char *type, LONG interval, BOOL notify)
-{
-    struct BAMessage *msg;
-    LONG result;
-    
-    /* Validate parameters */
-    if (!name || !type || interval < 0) {
-        return BA_INVALID;
-    }
-    
-    /* Create message */
-    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
-    if (!msg) {
-        return BA_NOMEM;
-    }
-    
-    /* Initialize message */
-    msg->type = BA_MSG_MONITOR;
-    msg->data.monitor_msg.name = name;
-    msg->data.monitor_msg.type = type;
-    msg->data.monitor_msg.interval = interval;
-    msg->data.monitor_msg.notify = notify;
-    
-    /* Send message */
-    #ifdef __amigaos4__
-    result = IBonAmi->BASendMessage(msg);
-    #else
-    result = BASendMessage(msg);
-    #endif
-    
-    /* Free message */
-    FreeVec(msg);
-    
-    return result;
-}
-
-/* Get interface status */
-LONG BAGetInterfaceStatus(struct BAInterface *interface)
-{
-    struct BAMessage *msg;
-    LONG result;
-    
-    /* Validate parameters */
-    if (!interface) {
-        return BA_INVALID;
-    }
-    
-    /* Create message */
-    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
-    if (!msg) {
-        return BA_NOMEM;
-    }
-    
-    /* Initialize message */
-    msg->type = BA_MSG_GET_INTERFACE;
-    msg->data.interface_msg.interface = interface;
-    
-    /* Send message */
-    #ifdef __amigaos4__
-    result = IBonAmi->BASendMessage(msg);
-    #else
-    result = BASendMessage(msg);
-    #endif
-    
-    /* Free message */
-    FreeVec(msg);
-    
-    return result;
-}
-
-/* Get daemon status */
-LONG BAGetDaemonStatus(struct BAStatus *status)
-{
-    struct BAMessage *msg;
-    LONG result;
-    
-    /* Validate parameters */
-    if (!status) {
-        return BA_INVALID;
-    }
-    
-    /* Create message */
-    msg = AllocVec(sizeof(struct BAMessage), MEMF_CLEAR);
-    if (!msg) {
-        return BA_NOMEM;
-    }
-    
-    /* Initialize message */
-    msg->type = BA_MSG_GET_STATUS;
-    msg->data.status_msg.status = status;
-    
-    /* Send message */
-    #ifdef __amigaos4__
-    result = IBonAmi->BASendMessage(msg);
-    #else
-    result = BASendMessage(msg);
-    #endif
-    
-    /* Free message */
-    FreeVec(msg);
-    
-    return result;
 } 
