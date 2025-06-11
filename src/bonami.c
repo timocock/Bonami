@@ -101,36 +101,20 @@ struct BADiscoveryNode {
     BOOL running;
 };
 
-/* Global state */
-struct {
-    struct Library *execBase;
-    struct Library *dosBase;
-    struct Library *bsdsocketBase;
-    struct List *services;
-    struct List *cache;
-    struct List *monitors;
-    struct List *updateCallbacks;
-    struct SignalSemaphore *lock;
-    struct MsgPort *port;
-    struct Task *mainTask;
-    struct Task *networkTask;
-    struct Task *discoveryTask;
-    struct BAInterface interfaces[MAX_INTERFACES];
-    ULONG numInterfaces;
-    struct BAConfig config;
+/* Daemon state */
+static struct {
+    struct List services;
+    struct List discoveries;
+    struct List monitors;
+    struct List cache;
+    struct InterfaceState interfaces[MAX_INTERFACES];
+    LONG num_interfaces;
+    char hostname[256];
     BOOL running;
     BOOL debug;
-    struct Library *roadshow;
-    struct Library *utility;
-    struct Process *mainProc;
-    struct Process *networkProc;
-    struct Process *discoveryProc;
-    struct InterfaceState interfaces[MAX_INTERFACES];
-    LONG logLevel;
-    char hostname[BA_MAX_NAME_LEN];
-    LONG cacheTimeout;
-    LONG mdnsTTL;
-    ULONG signals;  /* Signal mask for main task */
+    LONG log_level;
+    BPTR console;
+    BPTR log_file;
 } bonami;
 
 /* Function prototypes */
@@ -232,120 +216,60 @@ static void handleSignals(void) {
 /* Initialize daemon */
 static LONG initDaemon(void)
 {
-    LONG result;
-    
-    /* Open required libraries */
-    bonami.execBase = OpenLibrary("exec.library", 0);
-    if (!bonami.execBase) {
-        return BONAMI_ERROR;
-    }
-    
-    bonami.dosBase = OpenLibrary("dos.library", 0);
-    if (!bonami.dosBase) {
-        cleanupDaemon();
-        return BONAMI_ERROR;
-    }
-    
-    bonami.bsdsocketBase = OpenLibrary("bsdsocket.library", 0);
-    if (!bonami.bsdsocketBase) {
-        cleanupDaemon();
-        return BONAMI_ERROR;
-    }
-    
-    bonami.roadshow = OpenLibrary("roadshow.library", 0);
-    if (!bonami.roadshow) {
-        cleanupDaemon();
-        return BONAMI_ERROR;
-    }
-    
-    bonami.utility = OpenLibrary("utility.library", 0);
-    if (!bonami.utility) {
-        cleanupDaemon();
-        return BONAMI_ERROR;
-    }
-    
-    /* Initialize socket library */
-    if (SocketBaseTags(SBTM_SETVAL(SBTC_ERRNOPTR(sizeof(errno))), (ULONG)&errno,
-                       SBTM_SETVAL(SBTC_LOGTAGPTR), (ULONG)"Bonami",
-                       TAG_DONE)) {
-        cleanupDaemon();
-        return BONAMI_ERROR;
-    }
-    
-    /* Create message port */
-    bonami.port = CreateMsgPort();
-    if (!bonami.port) {
-        cleanupDaemon();
-        return BONAMI_ERROR;
-    }
+    BPTR lock;
+    char log_path[256];
     
     /* Initialize lists */
-    bonami.services = AllocMem(sizeof(struct List), MEMF_CLEAR);
-    bonami.cache = AllocMem(sizeof(struct List), MEMF_CLEAR);
-    if (!bonami.services || !bonami.cache) {
-        cleanupDaemon();
-        return BONAMI_NOMEM;
+    NewList(&bonami.services);
+    NewList(&bonami.discoveries);
+    NewList(&bonami.monitors);
+    NewList(&bonami.cache);
+    
+    /* Initialize state */
+    bonami.num_interfaces = 0;
+    bonami.running = TRUE;
+    bonami.debug = FALSE;
+    bonami.log_level = LOG_INFO;
+    bonami.console = NULL;
+    bonami.log_file = NULL;
+    
+    /* Open console */
+    bonami.console = Open("CON:0/0/640/200/BonAmi Daemon", MODE_NEWFILE);
+    if (!bonami.console) {
+        return BA_ERROR;
     }
-    NewList(bonami.services);
-    NewList(bonami.cache);
     
-    /* Initialize semaphore */
-    InitSemaphore(&bonami.lock);
+    /* Create log directory */
+    lock = CreateDir("ENV:Bonami/logs");
+    if (!lock) {
+        Close(bonami.console);
+        return BA_ERROR;
+    }
+    UnLock(lock);
     
-    /* Load configuration */
-    result = loadConfig();
-    if (result != BONAMI_OK) {
-        cleanupDaemon();
-        return result;
+    /* Open log file */
+    snprintf(log_path, sizeof(log_path), "ENV:Bonami/logs/bonamid.log");
+    bonami.log_file = Open(log_path, MODE_NEWFILE);
+    if (!bonami.log_file) {
+        Close(bonami.console);
+        return BA_ERROR;
     }
     
-    /* Initialize interfaces */
-    result = initInterfaces();
-    if (result != BONAMI_OK) {
-        cleanupDaemon();
-        return result;
+    /* Initialize network */
+    if (initInterfaces() != BA_OK) {
+        Close(bonami.log_file);
+        Close(bonami.console);
+        return BA_ERROR;
     }
     
     /* Resolve hostname */
-    result = resolveHostname();
-    if (result != BONAMI_OK) {
-        cleanupDaemon();
-        return result;
+    if (resolveHostname() != BA_OK) {
+        Close(bonami.log_file);
+        Close(bonami.console);
+        return BA_ERROR;
     }
     
-    /* Store main process */
-    bonami.mainProc = (struct Process *)FindTask(NULL);
-    
-    /* Set up signal handling */
-    bonami.signals = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E;
-    SetSignal(0, bonami.signals);
-    
-    /* Create network monitor task */
-    bonami.networkProc = (struct Process *)CreateNewProcTags(
-        NP_Name, "Bonami Monitor",
-        NP_Entry, networkMonitorTask,
-        NP_StackSize, 4096,
-        NP_Priority, 0,
-        TAG_DONE);
-    if (!bonami.networkProc) {
-        cleanupDaemon();
-        return BONAMI_ERROR;
-    }
-    
-    /* Create discovery task */
-    bonami.discoveryProc = (struct Process *)CreateNewProcTags(
-        NP_Name, "Bonami Discovery",
-        NP_Entry, discoveryTask,
-        NP_StackSize, 4096,
-        NP_Priority, 0,
-        TAG_DONE);
-    if (!bonami.discoveryProc) {
-        cleanupDaemon();
-        return BONAMI_ERROR;
-    }
-    
-    bonami.running = TRUE;
-    return BONAMI_OK;
+    return BA_OK;
 }
 
 /* Load configuration */
@@ -368,11 +292,11 @@ static LONG loadConfig(void)
     
     /* Load log level */
     if (GetVar(CONFIG_LOG_LEVEL, buffer, sizeof(buffer), 0) > 0) {
-        bonami.logLevel = atoi(buffer);
+        bonami.log_level = atoi(buffer);
     } else {
         /* Set default log level */
-        bonami.logLevel = LOG_INFO;
-        sprintf(buffer, "%ld", bonami.logLevel);
+        bonami.log_level = LOG_INFO;
+        sprintf(buffer, "%ld", bonami.log_level);
         SetVar(CONFIG_LOG_LEVEL, buffer, -1, GVF_GLOBAL_ONLY);
     }
     
@@ -400,10 +324,10 @@ static LONG loadConfig(void)
     if (GetVar(CONFIG_INTERFACES, buffer, sizeof(buffer), 0) > 0) {
         /* Parse interface list */
         char *iface = strtok(buffer, ",");
-        while (iface && bonami.numInterfaces < MAX_INTERFACES) {
-            strncpy(bonami.interfaces[bonami.numInterfaces].name, 
+        while (iface && bonami.num_interfaces < MAX_INTERFACES) {
+            strncpy(bonami.interfaces[bonami.num_interfaces].name, 
                    iface, sizeof(bonami.interfaces[0].name) - 1);
-            bonami.numInterfaces++;
+            bonami.num_interfaces++;
             iface = strtok(NULL, ",");
         }
     }
@@ -418,7 +342,7 @@ static LONG saveConfig(void)
     LONG i;
     
     /* Save log level */
-    sprintf(buffer, "%ld", bonami.logLevel);
+    sprintf(buffer, "%ld", bonami.log_level);
     SetVar(CONFIG_LOG_LEVEL, buffer, -1, GVF_GLOBAL_ONLY);
     
     /* Save cache timeout */
@@ -431,7 +355,7 @@ static LONG saveConfig(void)
     
     /* Save interface preferences */
     buffer[0] = '\0';
-    for (i = 0; i < bonami.numInterfaces; i++) {
+    for (i = 0; i < bonami.num_interfaces; i++) {
         if (i > 0) {
             strcat(buffer, ",");
         }
@@ -445,88 +369,28 @@ static LONG saveConfig(void)
 /* Cleanup daemon */
 static void cleanupDaemon(void)
 {
-    struct BAServiceNode *service;
-    struct BADiscoveryNode *discovery;
-    struct CacheEntry *entry;
-    
-    /* Stop tasks */
-    if (bonami.networkProc) {
-        Signal((struct Task *)bonami.networkProc, SIGBREAKF_CTRL_C);
-    }
-    if (bonami.discoveryProc) {
-        Signal((struct Task *)bonami.discoveryProc, SIGBREAKF_CTRL_C);
+    /* Close log file */
+    if (bonami.log_file) {
+        Close(bonami.log_file);
+        bonami.log_file = NULL;
     }
     
-    /* Clean up services */
-    if (bonami.services) {
-        while ((service = (struct BAServiceNode *)RemHead(bonami.services))) {
-            FreeMem(service, sizeof(struct BAServiceNode));
-        }
-        FreeMem(bonami.services, sizeof(struct List));
+    /* Close console */
+    if (bonami.console) {
+        Close(bonami.console);
+        bonami.console = NULL;
     }
     
-    /* Clean up cache */
-    if (bonami.cache) {
-        while ((entry = (struct CacheEntry *)RemHead(bonami.cache))) {
-            FreeMem(entry, sizeof(struct CacheEntry));
-        }
-        FreeMem(bonami.cache, sizeof(struct List));
-    }
-    
-    /* Clean up interfaces */
+    /* Cleanup interfaces */
     cleanupInterfaces();
     
-    /* Close message port */
-    if (bonami.port) {
-        DeleteMsgPort(bonami.port);
-    }
+    /* Cleanup cache */
+    cleanupCache();
     
-    /* Close libraries */
-    if (bonami.roadshow) {
-        CloseLibrary(bonami.roadshow);
-    }
-    if (bonami.bsdsocketBase) {
-        CloseLibrary(bonami.bsdsocketBase);
-    }
-    if (bonami.utility) {
-        CloseLibrary(bonami.utility);
-    }
-    if (bonami.dosBase) {
-        CloseLibrary(bonami.dosBase);
-    }
-    if (bonami.execBase) {
-        CloseLibrary(bonami.execBase);
-    }
-}
-
-/* Main function */
-int main(void)
-{
-    struct Message *msg;
-    LONG result;
-    
-    /* Initialize daemon */
-    result = initDaemon();
-    if (result != BONAMI_OK) {
-        return 1;
-    }
-    
-    /* Main loop */
-    while (bonami.running) {
-        /* Wait for message */
-        msg = WaitPort(bonami.port);
-        if (msg) {
-            msg = GetMsg(bonami.port);
-            if (msg) {
-                processMessage((struct BAMessage *)msg);
-            }
-        }
-    }
-    
-    /* Cleanup */
-    cleanupDaemon();
-    
-    return 0;
+    /* Cleanup lists */
+    while (RemHead(&bonami.services));
+    while (RemHead(&bonami.discoveries));
+    while (RemHead(&bonami.monitors));
 }
 
 /* Validate service type */
@@ -626,7 +490,7 @@ static void processMessage(struct BAMessage *msg)
             service->announceCount = 0;
             
             /* Add to service list */
-            AddTail(bonami.services, (struct Node *)service);
+            AddTail(&bonami.services, (struct Node *)service);
             
             /* Start probing */
             startServiceProbing(&bonami.interfaces[0], &service->service);
@@ -678,7 +542,7 @@ static void processMessage(struct BAMessage *msg)
             discovery->running = TRUE;
             
             /* Add to discovery list */
-            AddTail(bonami.services, (struct Node *)discovery);
+            AddTail(&bonami.services, (struct Node *)discovery);
             
             msg->data.discover_msg.result = BA_OK;
             break;
@@ -712,7 +576,7 @@ static void processMessage(struct BAMessage *msg)
             }
             
             /* Add monitor */
-            AddTail(bonami.monitors, (struct Node *)msg->data.monitor_msg.monitor);
+            AddTail(&bonami.monitors, (struct Node *)msg->data.monitor_msg.monitor);
             
             msg->data.monitor_msg.result = BA_OK;
             break;
@@ -739,7 +603,7 @@ static struct BAServiceNode *findService(const char *name, const char *type)
 {
     struct BAServiceNode *node;
     
-    for (node = (struct BAServiceNode *)bonami.services->lh_Head;
+    for (node = (struct BAServiceNode *)bonami.services.lh_Head;
          node->node.ln_Succ;
          node = (struct BAServiceNode *)node->node.ln_Succ) {
         if (strcmp(node->service.name, name) == 0 &&
@@ -756,7 +620,7 @@ static struct BADiscoveryNode *findDiscovery(const char *type)
 {
     struct BADiscoveryNode *node;
     
-    for (node = (struct BADiscoveryNode *)bonami.services->lh_Head;
+    for (node = (struct BADiscoveryNode *)bonami.services.lh_Head;
          node->node.ln_Succ;
          node = (struct BADiscoveryNode *)node->node.ln_Succ) {
         if (strcmp(node->discovery.type, type) == 0) {
@@ -774,7 +638,7 @@ static void removeServiceRecords(struct BAServiceNode *service)
     LONG i;
     
     /* Remove from all interfaces */
-    for (i = 0; i < bonami.numInterfaces; i++) {
+    for (i = 0; i < bonami.num_interfaces; i++) {
         iface = &bonami.interfaces[i];
         if (iface->active) {
             /* Remove PTR record */
@@ -1017,7 +881,7 @@ static void removeRecord(struct InterfaceState *iface, const char *name, UWORD t
     struct DNSRecord *record;
     struct DNSRecord *next;
     
-    for (record = (struct DNSRecord *)iface->records->lh_Head;
+    for (record = (struct DNSRecord *)iface->records.lh_Head;
          record->node.ln_Succ;
          record = next) {
         next = (struct DNSRecord *)record->node.ln_Succ;
@@ -1095,7 +959,7 @@ static void networkMonitorTask(void)
         }
         
         /* Check all interfaces */
-        for (i = 0; i < bonami.numInterfaces; i++) {
+        for (i = 0; i < bonami.num_interfaces; i++) {
             iface = &bonami.interfaces[i];
             if (checkInterface(iface) != BA_OK) {
                 /* Interface is down, wait before retrying */
@@ -1121,7 +985,7 @@ static void discoveryTask(void)
     
     while (bonami.running) {
         /* Process all interfaces */
-        for (i = 0; i < bonami.numInterfaces; i++) {
+        for (i = 0; i < bonami.num_interfaces; i++) {
             iface = &bonami.interfaces[i];
             if (!iface->active) {
                 continue;
@@ -1197,7 +1061,7 @@ static LONG checkNetworkStatus(void)
     LONG i;
     
     /* Check if any interface is active */
-    for (i = 0; i < bonami.numInterfaces; i++) {
+    for (i = 0; i < bonami.num_interfaces; i++) {
         iface = &bonami.interfaces[i];
         if (iface->active) {
             return BA_OK;
@@ -1215,14 +1079,14 @@ static void updateServiceRecords(struct BAServiceNode *service)
     LONG i;
     
     /* Update records on all interfaces */
-    for (i = 0; i < bonami.numInterfaces; i++) {
+    for (i = 0; i < bonami.num_interfaces; i++) {
         iface = &bonami.interfaces[i];
         if (!iface->active) {
             continue;
         }
         
         /* Remove old records */
-        for (record = (struct DNSRecord *)iface->records->lh_Head;
+        for (record = (struct DNSRecord *)iface->records.lh_Head;
              record->node.ln_Succ;
              record = (struct DNSRecord *)record->node.ln_Succ) {
             if (strcmp(record->name, service->service.name) == 0) {
@@ -1260,14 +1124,14 @@ static LONG processDNSQuery(struct DNSQuery *query)
     LONG i;
     
     /* Process all interfaces */
-    for (i = 0; i < bonami.numInterfaces; i++) {
+    for (i = 0; i < bonami.num_interfaces; i++) {
         iface = &bonami.interfaces[i];
         if (!iface->active) {
             continue;
         }
         
         /* Check records */
-        for (record = (struct DNSRecord *)iface->records->lh_Head;
+        for (record = (struct DNSRecord *)iface->records.lh_Head;
              record->node.ln_Succ;
              record = (struct DNSRecord *)record->node.ln_Succ) {
             if (strcmp(record->name, query->name) == 0 &&
@@ -1279,7 +1143,7 @@ static LONG processDNSQuery(struct DNSQuery *query)
         }
         
         /* Check questions */
-        for (question = (struct DNSQuestion *)iface->questions->lh_Head;
+        for (question = (struct DNSQuestion *)iface->questions.lh_Head;
              question->node.ln_Succ;
              question = (struct DNSQuestion *)question->node.ln_Succ) {
             if (strcmp(question->name, query->name) == 0 &&
@@ -1353,7 +1217,7 @@ static LONG initInterfaces(void)
         iface->active = TRUE;
     }
     
-    bonami.numInterfaces = MAX_INTERFACES;
+    bonami.num_interfaces = MAX_INTERFACES;
     return BA_OK;
 }
 
@@ -1368,7 +1232,7 @@ static void cleanupInterfaces(void)
     }
     
     /* Cleanup interfaces */
-    for (i = 0; i < bonami.numInterfaces; i++) {
+    for (i = 0; i < bonami.num_interfaces; i++) {
         iface = &bonami.interfaces[i];
         
         /* Close socket */
@@ -1386,7 +1250,7 @@ static void cleanupInterfaces(void)
     /* Free interface array */
     FreeMem(bonami.interfaces, sizeof(struct InterfaceState) * MAX_INTERFACES);
     bonami.interfaces = NULL;
-    bonami.numInterfaces = 0;
+    bonami.num_interfaces = 0;
 }
 
 /* Check interface */
@@ -1416,7 +1280,7 @@ static void updateInterfaceServices(struct InterfaceState *iface)
     struct BAServiceNode *service;
     
     /* Update all services */
-    for (service = (struct BAServiceNode *)bonami.services->lh_Head;
+    for (service = (struct BAServiceNode *)bonami.services.lh_Head;
          service->node.ln_Succ;
          service = (struct BAServiceNode *)service->node.ln_Succ) {
         updateServiceRecords(service);
@@ -1456,7 +1320,7 @@ static void addCacheEntry(const char *name, WORD type, WORD class,
     entry->expires = GetSysTime() + 120;  /* 2 minutes */
     
     /* Add to cache */
-    AddTail(bonami.cache, (struct Node *)entry);
+    AddTail(&bonami.cache, (struct Node *)entry);
 }
 
 /* Remove cache entry */
@@ -1465,7 +1329,7 @@ static void removeCacheEntry(const char *name, WORD type, WORD class)
     struct CacheEntry *entry;
     struct CacheEntry *next;
     
-    for (entry = (struct CacheEntry *)bonami.cache->lh_Head;
+    for (entry = (struct CacheEntry *)bonami.cache.lh_Head;
          entry->node.ln_Succ;
          entry = next) {
         next = (struct CacheEntry *)entry->node.ln_Succ;
@@ -1489,7 +1353,7 @@ static struct CacheEntry *findCacheEntry(const char *name, WORD type, WORD class
 {
     struct CacheEntry *entry;
     
-    for (entry = (struct CacheEntry *)bonami.cache->lh_Head;
+    for (entry = (struct CacheEntry *)bonami.cache.lh_Head;
          entry->node.ln_Succ;
          entry = (struct CacheEntry *)entry->node.ln_Succ) {
         if (strcmp(entry->name, name) == 0 &&
@@ -1508,7 +1372,7 @@ static void cleanupCache(void)
     struct CacheEntry *entry;
     struct CacheEntry *next;
     
-    for (entry = (struct CacheEntry *)bonami.cache->lh_Head;
+    for (entry = (struct CacheEntry *)bonami.cache.lh_Head;
          entry->node.ln_Succ;
          entry = next) {
         next = (struct CacheEntry *)entry->node.ln_Succ;
@@ -1554,7 +1418,7 @@ static LONG checkServiceConflict(const char *name, const char *type)
     query.class = DNS_CLASS_IN;
     
     /* Check all interfaces */
-    for (i = 0; i < bonami.numInterfaces; i++) {
+    for (i = 0; i < bonami.num_interfaces; i++) {
         iface = &bonami.interfaces[i];
         if (!iface->active) {
             continue;
@@ -1616,7 +1480,7 @@ static void processServiceStates(struct InterfaceState *iface)
     struct BAServiceNode *service;
     struct BAServiceNode *next;
     
-    for (service = (struct BAServiceNode *)bonami.services->lh_Head;
+    for (service = (struct BAServiceNode *)bonami.services.lh_Head;
          service->node.ln_Succ;
          service = next) {
         next = (struct BAServiceNode *)service->node.ln_Succ;
@@ -1650,7 +1514,7 @@ static void processUpdateCallbacks(struct BAService *service)
 {
     struct BAMonitor *monitor;
     
-    for (monitor = (struct BAMonitor *)bonami.monitors->lh_Head;
+    for (monitor = (struct BAMonitor *)bonami.monitors.lh_Head;
          monitor->node.ln_Succ;
          monitor = (struct BAMonitor *)monitor->node.ln_Succ) {
         if (strcmp(monitor->type, service->type) == 0) {
@@ -1666,7 +1530,7 @@ static struct DNSQuery *getNextQuery(struct InterfaceState *iface)
     struct DNSQuery *query;
     
     /* Get first query */
-    query = (struct DNSQuery *)iface->questions->lh_Head;
+    query = (struct DNSQuery *)iface->questions.lh_Head;
     if (!query->node.ln_Succ) {
         return NULL;
     }
@@ -1681,7 +1545,7 @@ static struct DNSQuery *getNextQuery(struct InterfaceState *iface)
 static void requeueQuery(struct InterfaceState *iface, struct DNSQuery *query)
 {
     /* Add to end of list */
-    AddTail(iface->questions, (struct Node *)query);
+    AddTail(&iface->questions, (struct Node *)query);
 }
 
 /* Send query */
@@ -1733,5 +1597,65 @@ static void cleanupList(struct List *list)
         
         /* Free memory */
         FreeMem(node, sizeof(struct Node));
+    }
+}
+
+/* Log message */
+static void logMessage(LONG level, const char *format, ...)
+{
+    va_list args;
+    char buffer[256];
+    char *prefix;
+    
+    /* Check log level */
+    if (level > bonami.log_level) {
+        return;
+    }
+    
+    /* Get prefix */
+    switch (level) {
+        case LOG_ERROR:
+            prefix = "ERROR: ";
+            break;
+        case LOG_WARN:
+            prefix = "WARNING: ";
+            break;
+        case LOG_INFO:
+            prefix = "INFO: ";
+            break;
+        case LOG_DEBUG:
+            prefix = "DEBUG: ";
+            break;
+        default:
+            prefix = "";
+    }
+    
+    /* Format message */
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    
+    /* Write to console */
+    if (bonami.console) {
+        Write(bonami.console, prefix, strlen(prefix));
+        Write(bonami.console, buffer, strlen(buffer));
+        Write(bonami.console, "\n", 1);
+    }
+    
+    /* Write to log file if enabled */
+    if (bonami.log_file) {
+        BPTR lock;
+        struct DateStamp ds;
+        
+        /* Get current date */
+        DateStamp(&ds);
+        
+        /* Format timestamp */
+        snprintf(buffer, sizeof(buffer), "%ld.%ld.%ld %s%s\n",
+                ds.ds_Days, ds.ds_Minute, ds.ds_Tick,
+                prefix, buffer);
+        
+        /* Write to file */
+        Write(bonami.log_file, buffer, strlen(buffer));
     }
 } 
