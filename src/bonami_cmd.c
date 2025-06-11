@@ -161,66 +161,81 @@ static void FreePooled(APTR memory, ULONG size)
 /* Handle discover command */
 static LONG handleDiscover(struct RDArgs *args)
 {
-    struct BADiscovery discovery;
-    struct List services;
-    struct BAServiceInfo *info;
-    LONG timeout = 5;
-    char *type = NULL;
-    char *name = NULL;
-    char *filter = NULL;
-
-    /* Get arguments */
+    struct BAConfig config;
+    struct BATXTRecord *txt = NULL;
+    struct BAServiceList *services = NULL;
+    LONG result;
+    
+    /* Check arguments */
     if (args->RDA_Flags & RDA_TYPE) {
-        type = (char *)args->RDA_Type;
+        txt = BACreateTXTRecord();
+        if (!txt) {
+            printf("Error: Failed to create TXT record\n");
+            return RETURN_ERROR;
+        }
+        
+        /* Add TXT record */
+        result = BAAddTXTRecord(txt, (char *)args->RDA_TYPE, (char *)args->RDA_NAME);
+        if (result != BA_OK) {
+            printf("Error: Failed to add TXT record\n");
+            BAFreeTXTRecord(txt);
+            return RETURN_ERROR;
+        }
     }
-    if (args->RDA_Flags & RDA_NAME) {
-        name = (char *)args->RDA_Name;
-    }
-    if (args->RDA_Flags & RDA_FILTER) {
-        filter = (char *)args->RDA_FILTER;
-    }
-    if (args->RDA_Flags & RDA_TIMEOUT) {
-        timeout = *(LONG *)args->RDA_TIMEOUT;
-    }
-
-    /* Check required arguments */
-    if (!type) {
-        printf("Error: TYPE argument is required\n");
-        printUsage(&commands[0]);
-        return RETURN_ERROR;
-    }
-
-    /* Initialize discovery */
-    memset(&discovery, 0, sizeof(discovery));
-    strncpy(discovery.type, type, BA_MAX_SERVICE_LEN - 1);
-    discovery.services = &services;
-    NewList(discovery.services);
-
+    
     /* Start discovery */
-    if (BAStartDiscovery(&discovery) != BA_OK) {
+    result = BAStartDiscovery((char *)args->RDA_TYPE, txt);
+    if (result != BA_OK) {
         printf("Error: Failed to start discovery\n");
+        if (txt) {
+            BAFreeTXTRecord(txt);
+        }
         return RETURN_ERROR;
     }
-
-    /* Wait for timeout */
-    Delay(timeout * 50);
-
-    /* Stop discovery */
-    BAStopDiscovery(&discovery);
-
-    /* Print results */
-    printf("Discovered services:\n");
-    for (info = (struct BAServiceInfo *)services.lh_Head; info->node.ln_Succ; info = (struct BAServiceInfo *)info->node.ln_Succ) {
-        printf("  %s (%s) - %s:%d\n", info->name, info->type, inet_ntoa(*(struct in_addr *)&info->ip), info->port);
+    
+    /* Wait for discovery to complete */
+    Delay(50);
+    
+    /* Get services */
+    services = BAGetServices((char *)args->RDA_TYPE);
+    if (!services) {
+        printf("Error: Failed to get services\n");
+        BAStopDiscovery((char *)args->RDA_TYPE);
+        if (txt) {
+            BAFreeTXTRecord(txt);
+        }
+        return RETURN_ERROR;
     }
-
+    
+    /* Print services */
+    struct BAServiceList *current;
+    for (current = services; current; current = current->next) {
+        printf("Service: %s\n", current->name);
+        printf("  Type: %s\n", current->type);
+        printf("  Port: %d\n", current->port);
+        printf("  Host: %s\n", current->host);
+        
+        /* Print TXT records */
+        struct BATXTRecord *txt;
+        for (txt = current->txt; txt; txt = txt->next) {
+            printf("  %s=%s\n", txt->key, txt->value);
+        }
+    }
+    
+    /* Cleanup */
+    BAFreeServiceList(services);
+    BAStopDiscovery((char *)args->RDA_TYPE);
+    if (txt) {
+        BAFreeTXTRecord(txt);
+    }
+    
     return RETURN_OK;
 }
 
 /* Handle register command */
 static LONG handleRegister(struct RDArgs *args)
 {
-    struct BAService service;
+    struct BAConfig config;
     struct BATXTRecord *txt = NULL;
     char *name = NULL;
     char *type = NULL;
@@ -250,36 +265,61 @@ static LONG handleRegister(struct RDArgs *args)
         return RETURN_ERROR;
     }
 
-    /* Initialize service */
-    memset(&service, 0, sizeof(service));
-    strncpy(service.name, name, BA_MAX_NAME_LEN - 1);
-    strncpy(service.type, type, BA_MAX_SERVICE_LEN - 1);
-    service.port = port;
-
-    /* Add TXT records */
-    for (LONG i = 0; i < numTxtArgs; i++) {
-        char *key = txtArgs[i];
-        char *value = strchr(key, '=');
-        if (value) {
-            *value++ = '\0';
-            struct BATXTRecord *newTxt = BACreateTXTRecord(key, value);
-            if (newTxt) {
-                newTxt->next = txt;
-                txt = newTxt;
+    /* Initialize library */
+    if (BAOpenLibrary() != BA_OK) {
+        printf("Error: Failed to open library\n");
+        return RETURN_ERROR;
+    }
+    
+    /* Get current config */
+    if (BAGetConfig(&config) != BA_OK) {
+        printf("Error: Failed to get config\n");
+        BACloseLibrary();
+        return RETURN_ERROR;
+    }
+    
+    /* Create TXT record if specified */
+    if (numTxtArgs > 0) {
+        txt = BACreateTXTRecord();
+        if (!txt) {
+            printf("Error: Failed to create TXT record\n");
+            BACloseLibrary();
+            return RETURN_ERROR;
+        }
+        
+        /* Add TXT record */
+        for (LONG i = 0; i < numTxtArgs; i++) {
+            char *key = txtArgs[i];
+            char *value = strchr(key, '=');
+            if (value) {
+                *value++ = '\0';
+                if (BAAddTXTRecord(txt, key, value) != BA_OK) {
+                    printf("Error: Failed to add TXT record\n");
+                    BAFreeTXTRecord(txt);
+                    BACloseLibrary();
+                    return RETURN_ERROR;
+                }
             }
         }
     }
-    service.txt = txt;
-
+    
     /* Register service */
-    if (BARegisterService(&service) != BA_OK) {
+    if (BARegisterService(name, type, port, txt) != BA_OK) {
         printf("Error: Failed to register service\n");
-        BAFreeTXTRecord(txt);
+        if (txt) {
+            BAFreeTXTRecord(txt);
+        }
+        BACloseLibrary();
         return RETURN_ERROR;
     }
-
+    
+    /* Cleanup */
+    if (txt) {
+        BAFreeTXTRecord(txt);
+    }
+    BACloseLibrary();
+    
     printf("Service registered successfully\n");
-    BAFreeTXTRecord(txt);
     return RETURN_OK;
 }
 

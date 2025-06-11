@@ -769,19 +769,20 @@ static void startServiceProbing(struct InterfaceState *iface, struct BAService *
 /* Create a PTR record */
 static struct DNSRecord *createPTRRecord(const char *type, const char *name)
 {
-    struct DNSRecord *record;
-    char *ptrName;
+    struct DNSRecord *record = NULL;
+    char *ptrName = NULL;
+    char *nameCopy = NULL;
     
     /* Allocate record */
-    record = AllocMem(sizeof(struct DNSRecord), MEMF_CLEAR);
+    record = AllocPooled(sizeof(struct DNSRecord));
     if (!record) {
         return NULL;
     }
     
     /* Create PTR name */
-    ptrName = AllocMem(strlen(type) + 6, MEMF_CLEAR);
+    ptrName = AllocPooled(strlen(type) + 6);
     if (!ptrName) {
-        FreeMem(record, sizeof(struct DNSRecord));
+        FreePooled(record, sizeof(struct DNSRecord));
         return NULL;
     }
     
@@ -793,12 +794,15 @@ static struct DNSRecord *createPTRRecord(const char *type, const char *name)
     record->type = DNS_TYPE_PTR;
     record->class = DNS_CLASS_IN;
     record->ttl = 120;  /* 2 minutes */
-    record->data.ptr.name = strdup(name);
-    if (!record->data.ptr.name) {
-        FreeMem(ptrName, strlen(type) + 6);
-        FreeMem(record, sizeof(struct DNSRecord));
+    
+    /* Copy name */
+    nameCopy = strdup(name);
+    if (!nameCopy) {
+        FreePooled(ptrName, strlen(type) + 6);
+        FreePooled(record, sizeof(struct DNSRecord));
         return NULL;
     }
+    record->data.ptr.name = nameCopy;
     
     return record;
 }
@@ -806,20 +810,23 @@ static struct DNSRecord *createPTRRecord(const char *type, const char *name)
 /* Create an SRV record */
 static struct DNSRecord *createSRVRecord(const char *name, UWORD port, const char *host)
 {
-    struct DNSRecord *record;
+    struct DNSRecord *record = NULL;
+    char *nameCopy = NULL;
+    char *hostCopy = NULL;
     
     /* Allocate record */
-    record = AllocMem(sizeof(struct DNSRecord), MEMF_CLEAR);
+    record = AllocPooled(sizeof(struct DNSRecord));
     if (!record) {
         return NULL;
     }
     
-    /* Initialize record */
-    record->name = strdup(name);
-    if (!record->name) {
-        FreeMem(record, sizeof(struct DNSRecord));
+    /* Copy name */
+    nameCopy = strdup(name);
+    if (!nameCopy) {
+        FreePooled(record, sizeof(struct DNSRecord));
         return NULL;
     }
+    record->name = nameCopy;
     
     record->type = DNS_TYPE_SRV;
     record->class = DNS_CLASS_IN;
@@ -827,12 +834,15 @@ static struct DNSRecord *createSRVRecord(const char *name, UWORD port, const cha
     record->data.srv.priority = 0;
     record->data.srv.weight = 0;
     record->data.srv.port = port;
-    record->data.srv.target = strdup(host);
-    if (!record->data.srv.target) {
-        FreeMem(record->name, strlen(name) + 1);
-        FreeMem(record, sizeof(struct DNSRecord));
+    
+    /* Copy host */
+    hostCopy = strdup(host);
+    if (!hostCopy) {
+        FreePooled(nameCopy, strlen(name) + 1);
+        FreePooled(record, sizeof(struct DNSRecord));
         return NULL;
     }
+    record->data.srv.target = hostCopy;
     
     return record;
 }
@@ -840,23 +850,25 @@ static struct DNSRecord *createSRVRecord(const char *name, UWORD port, const cha
 /* Create a TXT record */
 static struct DNSRecord *createTXTRecord(const char *name, const struct BATXTRecord *txt)
 {
-    struct DNSRecord *record;
+    struct DNSRecord *record = NULL;
     struct BATXTRecord *current;
     LONG length = 0;
-    char *data;
+    char *data = NULL;
+    char *nameCopy = NULL;
     
     /* Allocate record */
-    record = AllocMem(sizeof(struct DNSRecord), MEMF_CLEAR);
+    record = AllocPooled(sizeof(struct DNSRecord));
     if (!record) {
         return NULL;
     }
     
-    /* Initialize record */
-    record->name = strdup(name);
-    if (!record->name) {
-        FreeMem(record, sizeof(struct DNSRecord));
+    /* Copy name */
+    nameCopy = strdup(name);
+    if (!nameCopy) {
+        FreePooled(record, sizeof(struct DNSRecord));
         return NULL;
     }
+    record->name = nameCopy;
     
     record->type = DNS_TYPE_TXT;
     record->class = DNS_CLASS_IN;
@@ -868,10 +880,10 @@ static struct DNSRecord *createTXTRecord(const char *name, const struct BATXTRec
     }
     
     /* Allocate data */
-    data = AllocMem(length + 1, MEMF_CLEAR);
+    data = AllocPooled(length + 1);
     if (!data) {
-        FreeMem(record->name, strlen(name) + 1);
-        FreeMem(record, sizeof(struct DNSRecord));
+        FreePooled(nameCopy, strlen(name) + 1);
+        FreePooled(record, sizeof(struct DNSRecord));
         return NULL;
     }
     
@@ -958,15 +970,19 @@ static void removeRecord(struct InterfaceState *iface, const char *name, UWORD t
             Remove((struct Node *)record);
             
             /* Free memory */
-            FreeMem(record->name, strlen(record->name) + 1);
-            if (record->type == DNS_TYPE_PTR) {
-                FreeMem(record->data.ptr.name, strlen(record->data.ptr.name) + 1);
-            } else if (record->type == DNS_TYPE_SRV) {
-                FreeMem(record->data.srv.target, strlen(record->data.srv.target) + 1);
-            } else if (record->type == DNS_TYPE_TXT) {
-                FreeMem(record->data.txt.data, record->data.txt.length + 1);
+            FreePooled(record->name, strlen(record->name) + 1);
+            switch (record->type) {
+                case DNS_TYPE_PTR:
+                    FreePooled(record->data.ptr.name, strlen(record->data.ptr.name) + 1);
+                    break;
+                case DNS_TYPE_SRV:
+                    FreePooled(record->data.srv.target, strlen(record->data.srv.target) + 1);
+                    break;
+                case DNS_TYPE_TXT:
+                    FreePooled(record->data.txt.data, record->data.txt.length + 1);
+                    break;
             }
-            FreeMem(record, sizeof(struct DNSRecord));
+            FreePooled(record, sizeof(struct DNSRecord));
         }
     }
 }
