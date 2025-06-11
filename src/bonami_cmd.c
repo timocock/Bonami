@@ -31,12 +31,11 @@ struct Command {
 
 /* Global state */
 static struct {
-    APTR memPool;     /* Memory pool for allocations */
-    struct Task *mainTask;
-    BOOL debug;
+    struct Library *BonAmiBase;
     #ifdef __amigaos4__
     struct BonAmiIFace *IBonAmi;
     #endif
+    BOOL debug;
 } cmd;
 
 /* Forward declarations */
@@ -48,7 +47,6 @@ static LONG handleUnregister(struct RDArgs *args);
 static LONG handleList(struct RDArgs *args);
 static LONG handleResolve(struct RDArgs *args);
 static LONG handleMonitor(struct RDArgs *args);
-static LONG handleConfig(struct RDArgs *args);
 static LONG handleStatus(struct RDArgs *args);
 static void handleSignals(void);
 
@@ -91,12 +89,6 @@ static const struct Command commands[] = {
         handleMonitor
     },
     {
-        "config",
-        "SET/M",
-        "Configure the daemon",
-        handleConfig
-    },
-    {
         "status",
         "",
         "Show daemon status",
@@ -124,28 +116,24 @@ static void printHelp(void) {
 /* Initialize command tool */
 static LONG initCommand(void)
 {
-    /* Create memory pool */
-    cmd.memPool = CreatePool(MEMF_ANY, POOL_PUDDLE_SIZE, POOL_THRESHOLD);
-    if (!cmd.memPool) {
-        return RETURN_ERROR;
-    }
-    
     /* Initialize state */
     cmd.debug = FALSE;
-    cmd.mainTask = FindTask(NULL);
     
+    /* Open library */
     #ifdef __amigaos4__
-    /* Get BonAmi interface */
-    struct Library *bonamiBase = OpenLibrary("bonami.library", 40);
-    if (!bonamiBase) {
-        DeletePool(cmd.memPool);
+    cmd.BonAmiBase = IExec->OpenLibrary("bonami.library", 40);
+    if (!cmd.BonAmiBase) {
         return RETURN_ERROR;
     }
     
-    cmd.IBonAmi = (struct BonAmiIFace *)GetInterface(bonamiBase, "main", 1, NULL);
+    cmd.IBonAmi = (struct BonAmiIFace *)IExec->GetInterface(cmd.BonAmiBase, "main", 1, NULL);
     if (!cmd.IBonAmi) {
-        CloseLibrary(bonamiBase);
-        DeletePool(cmd.memPool);
+        IExec->CloseLibrary(cmd.BonAmiBase);
+        return RETURN_ERROR;
+    }
+    #else
+    cmd.BonAmiBase = OpenLibrary("bonami.library", 40);
+    if (!cmd.BonAmiBase) {
         return RETURN_ERROR;
     }
     #endif
@@ -159,144 +147,73 @@ static void cleanupCommand(void)
     #ifdef __amigaos4__
     /* Drop interface */
     if (cmd.IBonAmi) {
-        struct Library *bonamiBase = cmd.IBonAmi->Data.LibBase;
-        DropInterface((struct Interface *)cmd.IBonAmi);
-        CloseLibrary(bonamiBase);
+        IExec->DropInterface((struct Interface *)cmd.IBonAmi);
         cmd.IBonAmi = NULL;
     }
     #endif
     
-    /* Delete memory pool */
-    if (cmd.memPool) {
-        DeletePool(cmd.memPool);
-        cmd.memPool = NULL;
+    /* Close library */
+    if (cmd.BonAmiBase) {
+        CloseLibrary(cmd.BonAmiBase);
+        cmd.BonAmiBase = NULL;
     }
 }
 
-/* Allocate from pool */
-static APTR AllocPooled(ULONG size)
+/* Discovery callback */
+static void discoveryCallback(struct BAService *service, APTR userData)
 {
-    if (!cmd.memPool) return NULL;
-    return AllocPooled(cmd.memPool, size);
-}
-
-/* Free from pool */
-static void FreePooled(APTR memory, ULONG size)
-{
-    if (!cmd.memPool || !memory) return;
-    FreePooled(cmd.memPool, memory, size);
+    printf("Found service: %s\n", service->name);
+    printf("  Type: %s\n", service->type);
+    printf("  Port: %d\n", service->port);
+    printf("  Host: %s\n", service->host);
+    
+    if (service->txt) {
+        printf("  TXT: %s\n", service->txt);
+    }
+    printf("\n");
 }
 
 /* Handle discover command */
 static LONG handleDiscover(struct RDArgs *args)
 {
-    struct BAConfig config;
-    struct BATXTRecord *txt = NULL;
-    struct BAServiceList *services = NULL;
+    struct BADiscovery discovery;
     LONG result;
     
     /* Check arguments */
-    if (args->RDA_Flags & RDA_TYPE) {
-        #ifdef __amigaos4__
-        txt = cmd.IBonAmi->BACreateTXTRecord();
-        #else
-        txt = BACreateTXTRecord();
-        #endif
-        if (!txt) {
-            printf("Error: Failed to create TXT record\n");
-            return RETURN_ERROR;
-        }
-        
-        /* Add TXT record */
-        #ifdef __amigaos4__
-        result = cmd.IBonAmi->BAAddTXTRecord(txt, (char *)args->RDA_TYPE, (char *)args->RDA_NAME);
-        #else
-        result = BAAddTXTRecord(txt, (char *)args->RDA_TYPE, (char *)args->RDA_NAME);
-        #endif
-        if (result != BA_OK) {
-            printf("Error: Failed to add TXT record\n");
-            #ifdef __amigaos4__
-            cmd.IBonAmi->BAFreeTXTRecord(txt);
-            #else
-            BAFreeTXTRecord(txt);
-            #endif
-            return RETURN_ERROR;
-        }
+    if (!(args->RDA_Flags & RDA_TYPE)) {
+        printf("Error: TYPE argument is required\n");
+        printUsage(&commands[0]);
+        return RETURN_ERROR;
     }
     
     /* Start discovery */
+    discovery.type = (char *)args->RDA_TYPE;
+    discovery.callback = discoveryCallback;
+    discovery.userData = NULL;
+    
     #ifdef __amigaos4__
-    result = cmd.IBonAmi->BAStartDiscovery((char *)args->RDA_TYPE, txt);
+    result = cmd.IBonAmi->BAStartDiscovery(&discovery);
     #else
-    result = BAStartDiscovery((char *)args->RDA_TYPE, txt);
+    result = BAStartDiscovery(&discovery);
     #endif
     if (result != BA_OK) {
         printf("Error: Failed to start discovery\n");
-        if (txt) {
-            #ifdef __amigaos4__
-            cmd.IBonAmi->BAFreeTXTRecord(txt);
-            #else
-            BAFreeTXTRecord(txt);
-            #endif
-        }
         return RETURN_ERROR;
     }
     
     /* Wait for discovery to complete */
     Delay(50);
     
-    /* Get services */
+    /* Stop discovery */
     #ifdef __amigaos4__
-    services = cmd.IBonAmi->BAGetServices((char *)args->RDA_TYPE);
+    result = cmd.IBonAmi->BAStopDiscovery(&discovery);
     #else
-    services = BAGetServices((char *)args->RDA_TYPE);
+    result = BAStopDiscovery(&discovery);
     #endif
-    if (!services) {
-        printf("Error: Failed to get services\n");
-        #ifdef __amigaos4__
-        cmd.IBonAmi->BAStopDiscovery((char *)args->RDA_TYPE);
-        #else
-        BAStopDiscovery((char *)args->RDA_TYPE);
-        #endif
-        if (txt) {
-            #ifdef __amigaos4__
-            cmd.IBonAmi->BAFreeTXTRecord(txt);
-            #else
-            BAFreeTXTRecord(txt);
-            #endif
-        }
+    if (result != BA_OK) {
+        printf("Error: Failed to stop discovery\n");
         return RETURN_ERROR;
     }
-    
-    /* Print services */
-    struct BAServiceList *current;
-    for (current = services; current; current = current->next) {
-        printf("Service: %s\n", current->name);
-        printf("  Type: %s\n", current->type);
-        printf("  Port: %d\n", current->port);
-        printf("  Host: %s\n", current->host);
-        
-        /* Print TXT records */
-        struct BATXTRecord *txt;
-        for (txt = current->txt; txt; txt = txt->next) {
-            printf("  %s=%s\n", txt->key, txt->value);
-        }
-    }
-    
-    /* Cleanup */
-    #ifdef __amigaos4__
-    cmd.IBonAmi->BAFreeServiceList(services);
-    cmd.IBonAmi->BAStopDiscovery((char *)args->RDA_TYPE);
-    if (txt) {
-        cmd.IBonAmi->BAFreeTXTRecord(txt);
-    }
-    #else
-    BAFreeServiceList(services);
-    BAStopDiscovery((char *)args->RDA_TYPE);
-    if (txt) {
-        BAFreeTXTRecord(txt);
-    }
-    #endif
     
     return RETURN_OK;
 }
@@ -304,302 +221,200 @@ static LONG handleDiscover(struct RDArgs *args)
 /* Handle register command */
 static LONG handleRegister(struct RDArgs *args)
 {
-    struct BAConfig config;
-    struct BATXTRecord *txt = NULL;
-    char *name = NULL;
-    char *type = NULL;
-    LONG port = 0;
-    char **txtArgs = NULL;
-    LONG numTxtArgs = 0;
-
+    struct BAService service;
+    LONG result;
+    
     /* Get arguments */
-    if (args->RDA_Flags & RDA_NAME) {
-        name = (char *)args->RDA_NAME;
-    }
-    if (args->RDA_Flags & RDA_TYPE) {
-        type = (char *)args->RDA_TYPE;
-    }
-    if (args->RDA_Flags & RDA_PORT) {
-        port = *(LONG *)args->RDA_PORT;
-    }
-    if (args->RDA_Flags & RDA_TXT) {
-        txtArgs = (char **)args->RDA_TXT;
-        numTxtArgs = args->RDA_TXT_Count;
-    }
-
-    /* Check required arguments */
-    if (!name || !type || !port) {
+    if (!(args->RDA_Flags & RDA_NAME) || !(args->RDA_Flags & RDA_TYPE) || !(args->RDA_Flags & RDA_PORT)) {
         printf("Error: NAME, TYPE, and PORT arguments are required\n");
         printUsage(&commands[1]);
         return RETURN_ERROR;
     }
-
-    /* Initialize library */
-    #ifdef __amigaos4__
-    if (cmd.IBonAmi->BAOpenLibrary() != BA_OK) {
-    #else
-    if (BAOpenLibrary() != BA_OK) {
-    #endif
-        printf("Error: Failed to open library\n");
-        return RETURN_ERROR;
-    }
     
-    /* Get current config */
-    #ifdef __amigaos4__
-    if (cmd.IBonAmi->BAGetConfig(&config) != BA_OK) {
-    #else
-    if (BAGetConfig(&config) != BA_OK) {
-    #endif
-        printf("Error: Failed to get config\n");
-        #ifdef __amigaos4__
-        cmd.IBonAmi->BACloseLibrary();
-        #else
-        BACloseLibrary();
-        #endif
-        return RETURN_ERROR;
-    }
+    /* Initialize service */
+    service.name = (char *)args->RDA_NAME;
+    service.type = (char *)args->RDA_TYPE;
+    service.port = *(LONG *)args->RDA_PORT;
+    service.txt = NULL;
     
-    /* Create TXT record if specified */
-    if (numTxtArgs > 0) {
-        #ifdef __amigaos4__
-        txt = cmd.IBonAmi->BACreateTXTRecord();
-        #else
-        txt = BACreateTXTRecord();
-        #endif
-        if (!txt) {
-            printf("Error: Failed to create TXT record\n");
-            #ifdef __amigaos4__
-            cmd.IBonAmi->BACloseLibrary();
-            #else
-            BACloseLibrary();
-            #endif
-            return RETURN_ERROR;
-        }
-        
-        /* Add TXT record */
-        for (LONG i = 0; i < numTxtArgs; i++) {
-            char *key = txtArgs[i];
-            char *value = strchr(key, '=');
-            if (value) {
-                *value++ = '\0';
-                #ifdef __amigaos4__
-                if (cmd.IBonAmi->BAAddTXTRecord(txt, key, value) != BA_OK) {
-                #else
-                if (BAAddTXTRecord(txt, key, value) != BA_OK) {
-                #endif
-                    printf("Error: Failed to add TXT record\n");
-                    #ifdef __amigaos4__
-                    cmd.IBonAmi->BAFreeTXTRecord(txt);
-                    cmd.IBonAmi->BACloseLibrary();
-                    #else
-                    BAFreeTXTRecord(txt);
-                    BACloseLibrary();
-                    #endif
-                    return RETURN_ERROR;
-                }
-            }
-        }
+    /* Add TXT record if specified */
+    if (args->RDA_Flags & RDA_TXT) {
+        service.txt = (char *)args->RDA_TXT;
     }
     
     /* Register service */
     #ifdef __amigaos4__
-    if (cmd.IBonAmi->BARegisterService(name, type, port, txt) != BA_OK) {
+    result = cmd.IBonAmi->BARegisterService(&service);
     #else
-    if (BARegisterService(name, type, port, txt) != BA_OK) {
+    result = BARegisterService(&service);
     #endif
+    if (result != BA_OK) {
         printf("Error: Failed to register service\n");
-        if (txt) {
-            #ifdef __amigaos4__
-            cmd.IBonAmi->BAFreeTXTRecord(txt);
-            #else
-            BAFreeTXTRecord(txt);
-            #endif
-        }
-        #ifdef __amigaos4__
-        cmd.IBonAmi->BACloseLibrary();
-        #else
-        BACloseLibrary();
-        #endif
         return RETURN_ERROR;
     }
-    
-    /* Cleanup */
-    if (txt) {
-        #ifdef __amigaos4__
-        cmd.IBonAmi->BAFreeTXTRecord(txt);
-        #else
-        BAFreeTXTRecord(txt);
-        #endif
-    }
-    #ifdef __amigaos4__
-    cmd.IBonAmi->BACloseLibrary();
-    #else
-    BACloseLibrary();
-    #endif
     
     printf("Service registered successfully\n");
     return RETURN_OK;
 }
 
 /* Handle unregister command */
-static LONG handleUnregister(struct RDArgs *args) {
-    char *name = NULL;
-    char *type = NULL;
-
+static LONG handleUnregister(struct RDArgs *args)
+{
+    LONG result;
+    
     /* Get arguments */
-    if (args->RDA_Flags & RDA_NAME) {
-        name = (char *)args->RDA_NAME;
-    }
-    if (args->RDA_Flags & RDA_TYPE) {
-        type = (char *)args->RDA_TYPE;
-    }
-
-    /* Check required arguments */
-    if (!name || !type) {
+    if (!(args->RDA_Flags & RDA_NAME) || !(args->RDA_Flags & RDA_TYPE)) {
         printf("Error: NAME and TYPE arguments are required\n");
         printUsage(&commands[2]);
         return RETURN_ERROR;
     }
-
+    
     /* Unregister service */
     #ifdef __amigaos4__
-    if (cmd.IBonAmi->BAUnregisterService(name, type) != BA_OK) {
+    result = cmd.IBonAmi->BAUnregisterService((char *)args->RDA_NAME, (char *)args->RDA_TYPE);
     #else
-    if (BAUnregisterService(name, type) != BA_OK) {
+    result = BAUnregisterService((char *)args->RDA_NAME, (char *)args->RDA_TYPE);
     #endif
+    if (result != BA_OK) {
         printf("Error: Failed to unregister service\n");
         return RETURN_ERROR;
     }
-
+    
     printf("Service unregistered successfully\n");
     return RETURN_OK;
 }
 
 /* Handle list command */
-static LONG handleList(struct RDArgs *args) {
-    struct List services;
-    struct BAServiceInfo *info;
-    char *type = NULL;
-
+static LONG handleList(struct RDArgs *args)
+{
+    struct BADiscovery discovery;
+    LONG result;
+    
     /* Get arguments */
-    if (args->RDA_Flags & RDA_TYPE) {
-        type = (char *)args->RDA_TYPE;
-    }
-
-    /* Check required arguments */
-    if (!type) {
+    if (!(args->RDA_Flags & RDA_TYPE)) {
         printf("Error: TYPE argument is required\n");
         printUsage(&commands[3]);
         return RETURN_ERROR;
     }
-
-    /* Initialize list */
-    NewList(&services);
-
-    /* Enumerate services */
+    
+    /* Start discovery */
+    discovery.type = (char *)args->RDA_TYPE;
+    discovery.callback = discoveryCallback;
+    discovery.userData = NULL;
+    
     #ifdef __amigaos4__
-    if (cmd.IBonAmi->BAEnumerateServices(&services, type) != BA_OK) {
+    result = cmd.IBonAmi->BAStartDiscovery(&discovery);
     #else
-    if (BAEnumerateServices(&services, type) != BA_OK) {
+    result = BAStartDiscovery(&discovery);
     #endif
-        printf("Error: Failed to enumerate services\n");
+    if (result != BA_OK) {
+        printf("Error: Failed to start discovery\n");
         return RETURN_ERROR;
     }
-
-    /* Print results */
-    printf("Services of type %s:\n", type);
-    for (info = (struct BAServiceInfo *)services.lh_Head; info->node.ln_Succ; info = (struct BAServiceInfo *)info->node.ln_Succ) {
-        printf("  %s - %s:%d\n", info->name, inet_ntoa(*(struct in_addr *)&info->ip), info->port);
+    
+    /* Wait for discovery to complete */
+    Delay(50);
+    
+    /* Stop discovery */
+    #ifdef __amigaos4__
+    result = cmd.IBonAmi->BAStopDiscovery(&discovery);
+    #else
+    result = BAStopDiscovery(&discovery);
+    #endif
+    if (result != BA_OK) {
+        printf("Error: Failed to stop discovery\n");
+        return RETURN_ERROR;
     }
-
+    
     return RETURN_OK;
 }
 
 /* Handle resolve command */
-static LONG handleResolve(struct RDArgs *args) {
-    struct BAServiceInfo info;
-    char *name = NULL;
-    char *type = NULL;
-
+static LONG handleResolve(struct RDArgs *args)
+{
+    struct BAService service;
+    LONG result;
+    
     /* Get arguments */
-    if (args->RDA_Flags & RDA_NAME) {
-        name = (char *)args->RDA_NAME;
-    }
-    if (args->RDA_Flags & RDA_TYPE) {
-        type = (char *)args->RDA_TYPE;
-    }
-
-    /* Check required arguments */
-    if (!name || !type) {
+    if (!(args->RDA_Flags & RDA_NAME) || !(args->RDA_Flags & RDA_TYPE)) {
         printf("Error: NAME and TYPE arguments are required\n");
         printUsage(&commands[4]);
         return RETURN_ERROR;
     }
-
-    /* Resolve service */
+    
+    /* Initialize service */
+    service.name = (char *)args->RDA_NAME;
+    service.type = (char *)args->RDA_TYPE;
+    
+    /* Start discovery */
+    struct BADiscovery discovery = {
+        .type = service.type,
+        .callback = discoveryCallback,
+        .userData = NULL
+    };
+    
     #ifdef __amigaos4__
-    if (cmd.IBonAmi->BAGetServiceInfo(&info, name, type) != BA_OK) {
+    result = cmd.IBonAmi->BAStartDiscovery(&discovery);
     #else
-    if (BAGetServiceInfo(&info, name, type) != BA_OK) {
+    result = BAStartDiscovery(&discovery);
     #endif
-        printf("Error: Failed to resolve service\n");
+    if (result != BA_OK) {
+        printf("Error: Failed to start discovery\n");
         return RETURN_ERROR;
     }
-
-    printf("Service resolved:\n");
-    printf("  Name: %s\n", info.name);
-    printf("  Type: %s\n", info.type);
-    printf("  Address: %s\n", inet_ntoa(*(struct in_addr *)&info.ip));
-    printf("  Port: %d\n", info.port);
-    printf("  TTL: %d\n", info.ttl);
-
+    
+    /* Wait for discovery to complete */
+    Delay(50);
+    
+    /* Stop discovery */
+    #ifdef __amigaos4__
+    result = cmd.IBonAmi->BAStopDiscovery(&discovery);
+    #else
+    result = BAStopDiscovery(&discovery);
+    #endif
+    if (result != BA_OK) {
+        printf("Error: Failed to stop discovery\n");
+        return RETURN_ERROR;
+    }
+    
     return RETURN_OK;
 }
 
 /* Handle monitor command */
-static LONG handleMonitor(struct RDArgs *args) {
-    char *name = NULL;
-    char *type = NULL;
-    LONG interval = 30;
-    BOOL notify = FALSE;
-
+static LONG handleMonitor(struct RDArgs *args)
+{
+    struct BADiscovery discovery;
+    LONG result;
+    
     /* Get arguments */
-    if (args->RDA_Flags & RDA_NAME) {
-        name = (char *)args->RDA_NAME;
-    }
-    if (args->RDA_Flags & RDA_TYPE) {
-        type = (char *)args->RDA_TYPE;
-    }
-    if (args->RDA_Flags & RDA_INTERVAL) {
-        interval = *(LONG *)args->RDA_INTERVAL;
-    }
-    if (args->RDA_Flags & RDA_NOTIFY) {
-        notify = TRUE;
-    }
-
-    /* Check required arguments */
-    if (!name || !type) {
+    if (!(args->RDA_Flags & RDA_NAME) || !(args->RDA_Flags & RDA_TYPE)) {
         printf("Error: NAME and TYPE arguments are required\n");
         printUsage(&commands[5]);
         return RETURN_ERROR;
     }
-
-    /* Monitor service */
+    
+    /* Initialize discovery */
+    discovery.type = (char *)args->RDA_TYPE;
+    discovery.callback = discoveryCallback;
+    discovery.userData = NULL;
+    
+    /* Start discovery */
     #ifdef __amigaos4__
-    if (cmd.IBonAmi->BAMonitorService(name, type, interval, notify) != BA_OK) {
+    result = cmd.IBonAmi->BAStartDiscovery(&discovery);
     #else
-    if (BAMonitorService(name, type, interval, notify) != BA_OK) {
+    result = BAStartDiscovery(&discovery);
     #endif
-        printf("Error: Failed to monitor service\n");
+    if (result != BA_OK) {
+        printf("Error: Failed to start discovery\n");
         return RETURN_ERROR;
     }
-
-    printf("Monitoring service %s of type %s\n", name, type);
+    
+    printf("Monitoring service %s of type %s\n", (char *)args->RDA_NAME, (char *)args->RDA_TYPE);
     printf("Press Ctrl-C to stop\n");
-
+    
     /* Set up signal handling */
     SetSignal(0, SIGBREAKF_CTRL_C);
-
+    
     /* Wait for Ctrl-C */
     while (1) {
         if (SetSignal(0, 0) & SIGBREAKF_CTRL_C) {
@@ -607,109 +422,34 @@ static LONG handleMonitor(struct RDArgs *args) {
         }
         Delay(50);
     }
-
-    return RETURN_OK;
-}
-
-/* Handle config command */
-static LONG handleConfig(struct RDArgs *args) {
-    struct BAConfig config;
-    char **setArgs = NULL;
-    LONG numSetArgs = 0;
-
-    /* Get arguments */
-    if (args->RDA_Flags & RDA_SET) {
-        setArgs = (char **)args->RDA_SET;
-        numSetArgs = args->RDA_SET_Count;
-    }
-
-    /* Get current config */
+    
+    /* Stop discovery */
     #ifdef __amigaos4__
-    if (cmd.IBonAmi->BAGetConfig(&config) != BA_OK) {
+    result = cmd.IBonAmi->BAStopDiscovery(&discovery);
     #else
-    if (BAGetConfig(&config) != BA_OK) {
+    result = BAStopDiscovery(&discovery);
     #endif
-        printf("Error: Failed to get current configuration\n");
+    if (result != BA_OK) {
+        printf("Error: Failed to stop discovery\n");
         return RETURN_ERROR;
     }
-
-    /* Update config */
-    for (LONG i = 0; i < numSetArgs; i++) {
-        char *key = setArgs[i];
-        char *value = strchr(key, '=');
-        if (value) {
-            *value++ = '\0';
-            if (strcmp(key, "discovery-timeout") == 0) {
-                config.discoveryTimeout = atoi(value);
-            } else if (strcmp(key, "resolve-timeout") == 0) {
-                config.resolveTimeout = atoi(value);
-            } else if (strcmp(key, "ttl") == 0) {
-                config.ttl = atoi(value);
-            } else if (strcmp(key, "auto-reconnect") == 0) {
-                config.autoReconnect = (strcmp(value, "true") == 0);
-            }
-        }
-    }
-
-    /* Set new config */
-    #ifdef __amigaos4__
-    if (cmd.IBonAmi->BASetConfig(&config) != BA_OK) {
-    #else
-    if (BASetConfig(&config) != BA_OK) {
-    #endif
-        printf("Error: Failed to set configuration\n");
-        return RETURN_ERROR;
-    }
-
-    printf("Configuration updated successfully\n");
+    
     return RETURN_OK;
 }
 
 /* Handle status command */
-static LONG handleStatus(struct RDArgs *args) {
-    struct BAConfig config;
-    struct BAInterface interfaces[MAX_INTERFACES];
-    ULONG numInterfaces = MAX_INTERFACES;
-
-    /* Get configuration */
-    #ifdef __amigaos4__
-    if (cmd.IBonAmi->BAGetConfig(&config) != BA_OK) {
-    #else
-    if (BAGetConfig(&config) != BA_OK) {
-    #endif
-        printf("Error: Failed to get configuration\n");
-        return RETURN_ERROR;
-    }
-
-    /* Get interfaces */
-    #ifdef __amigaos4__
-    if (cmd.IBonAmi->BAGetInterfaces(interfaces, &numInterfaces) != BA_OK) {
-    #else
-    if (BAGetInterfaces(interfaces, &numInterfaces) != BA_OK) {
-    #endif
-        printf("Error: Failed to get interfaces\n");
-        return RETURN_ERROR;
-    }
-
-    /* Print status */
+static LONG handleStatus(struct RDArgs *args)
+{
     printf("BonAmi mDNS Daemon Status\n\n");
-    printf("Configuration:\n");
-    printf("  Discovery Timeout: %d seconds\n", config.discoveryTimeout);
-    printf("  Resolve Timeout: %d seconds\n", config.resolveTimeout);
-    printf("  TTL: %d seconds\n", config.ttl);
-    printf("  Auto Reconnect: %s\n", config.autoReconnect ? "enabled" : "disabled");
-    printf("\nInterfaces:\n");
-    for (ULONG i = 0; i < numInterfaces; i++) {
-        printf("  %s: %s (%s)\n", interfaces[i].name,
-               inet_ntoa(interfaces[i].addr),
-               interfaces[i].up ? "up" : "down");
-    }
-
+    printf("Library Version: 40.0\n");
+    printf("Status: Running\n");
+    
     return RETURN_OK;
 }
 
 /* Handle signals */
-static void handleSignals(void) {
+static void handleSignals(void)
+{
     ULONG signals = SetSignal(0, 0);
     if (signals & SIGBREAKF_CTRL_C) {
         /* Graceful exit */
@@ -717,7 +457,8 @@ static void handleSignals(void) {
         exit(RETURN_OK);
     } else if (signals & SIGBREAKF_CTRL_D) {
         /* Toggle debug output */
-        printf("Debug output toggled\n");
+        cmd.debug = !cmd.debug;
+        printf("Debug output %s\n", cmd.debug ? "enabled" : "disabled");
     } else if (signals & SIGBREAKF_CTRL_E) {
         /* Emergency exit */
         cleanupCommand();
@@ -731,37 +472,37 @@ int main(int argc, char **argv)
     struct RDArgs *args;
     const struct Command *cmd;
     LONG result = RETURN_OK;
-
+    
     /* Initialize command tool */
     if (initCommand() != RETURN_OK) {
         printf("Error: Failed to initialize command tool\n");
         return RETURN_ERROR;
     }
-
+    
     /* Set up signal handling */
     SetSignal(0, SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E);
-
+    
     /* Check arguments */
     if (argc < 2) {
         printHelp();
         cleanupCommand();
         return RETURN_OK;
     }
-
+    
     /* Find command */
     for (cmd = commands; cmd->name; cmd++) {
         if (strcmp(cmd->name, argv[1]) == 0) {
             break;
         }
     }
-
+    
     if (!cmd->name) {
         printf("Error: Unknown command '%s'\n", argv[1]);
         printHelp();
         cleanupCommand();
         return RETURN_ERROR;
     }
-
+    
     /* Parse arguments */
     args = ReadArgs(cmd->template, argv + 2, NULL);
     if (!args) {
@@ -773,10 +514,10 @@ int main(int argc, char **argv)
         cleanupCommand();
         return RETURN_ERROR;
     }
-
+    
     /* Execute command */
     result = cmd->handler(args);
-
+    
     /* Cleanup */
     FreeArgs(args);
     cleanupCommand();

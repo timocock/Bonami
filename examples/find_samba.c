@@ -20,6 +20,19 @@ static const char *template = "TIMEOUT/N";
 /* Timeout in seconds */
 #define DISCOVERY_TIMEOUT 5
 
+/* Discovery callback */
+static void discoveryCallback(struct BAService *service, APTR userData)
+{
+    printf("Found Samba server: %s\n", service->name);
+    printf("  Host: %s\n", service->host);
+    printf("  Port: %ld\n", service->port);
+    
+    if (service->txt) {
+        printf("  TXT: %s\n", service->txt);
+    }
+    printf("\n");
+}
+
 /* Main function */
 int main(int argc, char **argv)
 {
@@ -27,9 +40,7 @@ int main(int argc, char **argv)
     #ifdef __amigaos4__
     struct BonAmiIFace *IBonAmi;
     #endif
-    struct BAConfig config;
-    struct BATXTRecord *txt = NULL;
-    struct BAServiceList *services = NULL;
+    struct BADiscovery discovery;
     LONG result;
     
     /* Open library */
@@ -54,54 +65,24 @@ int main(int argc, char **argv)
     }
     #endif
     
-    /* Get current configuration */
-    #ifdef __amigaos4__
-    if (IBonAmi->BAGetConfig(&config) != BA_OK) {
-    #else
-    if (BAGetConfig(&config) != BA_OK) {
-    #endif
-        printf("Failed to get configuration\n");
-        #ifdef __amigaos4__
-        IExec->DropInterface((struct Interface *)IBonAmi);
-        IExec->CloseLibrary(bonamiBase);
-        #else
-        CloseLibrary(bonamiBase);
-        #endif
-        return RETURN_ERROR;
-    }
-    
-    /* Create TXT record for discovery */
-    #ifdef __amigaos4__
-    txt = IBonAmi->BACreateTXTRecord();
-    #else
-    txt = BACreateTXTRecord();
-    #endif
-    if (!txt) {
-        printf("Failed to create TXT record\n");
-        #ifdef __amigaos4__
-        IExec->DropInterface((struct Interface *)IBonAmi);
-        IExec->CloseLibrary(bonamiBase);
-        #else
-        CloseLibrary(bonamiBase);
-        #endif
-        return RETURN_ERROR;
-    }
-    
     /* Start discovery */
     printf("Searching for Samba servers...\n");
+    
+    discovery.type = SAMBA_SERVICE_TYPE;
+    discovery.callback = discoveryCallback;
+    discovery.userData = NULL;
+    
     #ifdef __amigaos4__
-    result = IBonAmi->BAStartDiscovery(SAMBA_SERVICE_TYPE, txt);
+    result = IBonAmi->BAStartDiscovery(&discovery);
     #else
-    result = BAStartDiscovery(SAMBA_SERVICE_TYPE, txt);
+    result = BAStartDiscovery(&discovery);
     #endif
     if (result != BA_OK) {
         printf("Failed to start discovery\n");
         #ifdef __amigaos4__
-        IBonAmi->BAFreeTXTRecord(txt);
         IExec->DropInterface((struct Interface *)IBonAmi);
         IExec->CloseLibrary(bonamiBase);
         #else
-        BAFreeTXTRecord(txt);
         CloseLibrary(bonamiBase);
         #endif
         return RETURN_ERROR;
@@ -110,57 +91,21 @@ int main(int argc, char **argv)
     /* Wait for discovery */
     Delay(DISCOVERY_TIMEOUT * 50);  /* 50 ticks per second */
     
-    /* Get discovered services */
+    /* Stop discovery */
     #ifdef __amigaos4__
-    services = IBonAmi->BAGetDiscoveredServices(SAMBA_SERVICE_TYPE);
+    result = IBonAmi->BAStopDiscovery(&discovery);
     #else
-    services = BAGetDiscoveredServices(SAMBA_SERVICE_TYPE);
+    result = BAStopDiscovery(&discovery);
     #endif
-    if (!services) {
-        printf("No Samba servers found\n");
-        #ifdef __amigaos4__
-        IBonAmi->BAStopDiscovery(SAMBA_SERVICE_TYPE);
-        IBonAmi->BAFreeTXTRecord(txt);
-        IExec->DropInterface((struct Interface *)IBonAmi);
-        IExec->CloseLibrary(bonamiBase);
-        #else
-        BAStopDiscovery(SAMBA_SERVICE_TYPE);
-        BAFreeTXTRecord(txt);
-        CloseLibrary(bonamiBase);
-        #endif
-        return RETURN_OK;
-    }
-    
-    /* Print discovered services */
-    printf("\nFound Samba servers:\n");
-    printf("-------------------\n");
-    
-    struct BAService *service;
-    for (service = services->services; service; service = service->next) {
-        printf("Server: %s\n", service->name);
-        printf("  Host: %s\n", service->host);
-        printf("  Port: %ld\n", service->port);
-        
-        if (service->txt) {
-            struct BATXTRecord *record;
-            for (record = service->txt; record; record = record->next) {
-                printf("  %s=%s\n", record->key, record->value);
-            }
-        }
-        printf("\n");
+    if (result != BA_OK) {
+        printf("Failed to stop discovery\n");
     }
     
     /* Cleanup */
     #ifdef __amigaos4__
-    IBonAmi->BAFreeServiceList(services);
-    IBonAmi->BAStopDiscovery(SAMBA_SERVICE_TYPE);
-    IBonAmi->BAFreeTXTRecord(txt);
     IExec->DropInterface((struct Interface *)IBonAmi);
     IExec->CloseLibrary(bonamiBase);
     #else
-    BAFreeServiceList(services);
-    BAStopDiscovery(SAMBA_SERVICE_TYPE);
-    BAFreeTXTRecord(txt);
     CloseLibrary(bonamiBase);
     #endif
     
