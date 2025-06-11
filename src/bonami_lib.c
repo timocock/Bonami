@@ -98,7 +98,16 @@ static void monitorTask(void *arg);
 static BOOL matchFilter(struct BAService *service, struct BAFilter *filter);
 static LONG validateServiceType(const char *type);
 
-/* Library open */
+/**
+ * OpenLibrary - Initialize and open the BonAmi library
+ * 
+ * This function initializes the BonAmi library, creating necessary structures
+ * and setting up communication with the BonAmi daemon. It allocates memory
+ * for the library base, initializes semaphores and lists, and creates a
+ * reply port for message communication.
+ * 
+ * @return Pointer to the library base structure, or NULL if initialization fails
+ */
 struct Library *OpenLibrary(void)
 {
     struct BABase *base;
@@ -149,7 +158,13 @@ struct Library *OpenLibrary(void)
     return (struct Library *)base;
 }
 
-/* Library close */
+/**
+ * CloseLibrary - Clean up and close the BonAmi library
+ * 
+ * This function performs cleanup operations when the library is closed.
+ * It frees all allocated memory, removes monitors and callbacks,
+ * and deletes the reply port.
+ */
 void CloseLibrary(void)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
@@ -173,13 +188,27 @@ void CloseLibrary(void)
     FreeMem(base, sizeof(struct BABase));
 }
 
-/* Library expunge */
+/**
+ * ExpungeLibrary - Remove the library from memory
+ * 
+ * This function is called when the library is to be removed from memory.
+ * Currently, no special cleanup is required as CloseLibrary handles everything.
+ */
 void ExpungeLibrary(void)
 {
     /* Nothing to do here */
 }
 
-/* Service registration */
+/**
+ * BARegisterService - Register a service for advertisement
+ * 
+ * Registers a service for advertisement on the local network using mDNS.
+ * The service will be probed for conflicts before being announced.
+ * 
+ * @param service Pointer to a BAService structure containing service details
+ * @return BA_OK if successful, error code otherwise
+ * @see BAService
+ */
 LONG BARegisterService(struct BAService *service)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
@@ -228,7 +257,15 @@ LONG BARegisterService(struct BAService *service)
     return result;
 }
 
-/* Service unregistration */
+/**
+ * BAUnregisterService - Unregister a previously registered service
+ * 
+ * Removes a service from advertisement and cleans up associated resources.
+ * 
+ * @param name Service instance name
+ * @param type Service type (e.g., "_http._tcp.local")
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BAUnregisterService(const char *name, const char *type)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
@@ -264,7 +301,16 @@ LONG BAUnregisterService(const char *name, const char *type)
     return result;
 }
 
-/* Start service discovery */
+/**
+ * BAStartDiscovery - Start discovering services of a specific type
+ * 
+ * Initiates service discovery for the specified service type. Results
+ * will be added to the provided list structure.
+ * 
+ * @param discovery Pointer to a BADiscovery structure
+ * @return BA_OK if successful, error code otherwise
+ * @see BADiscovery
+ */
 LONG BAStartDiscovery(struct BADiscovery *discovery)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
@@ -299,7 +345,14 @@ LONG BAStartDiscovery(struct BADiscovery *discovery)
     return result;
 }
 
-/* Stop service discovery */
+/**
+ * BAStopDiscovery - Stop an active service discovery
+ * 
+ * Stops an ongoing service discovery operation and cleans up resources.
+ * 
+ * @param discovery Pointer to the BADiscovery structure used in BAStartDiscovery
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BAStopDiscovery(struct BADiscovery *discovery)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
@@ -333,7 +386,18 @@ LONG BAStopDiscovery(struct BADiscovery *discovery)
     return result;
 }
 
-/* Monitor service availability */
+/**
+ * BAMonitorService - Monitor a service for availability changes
+ * 
+ * Sets up monitoring for a specific service instance. The callback will be
+ * called when the service state changes.
+ * 
+ * @param name Service instance name
+ * @param type Service type
+ * @param checkInterval Interval between checks in seconds
+ * @param notifyOffline Whether to notify when service goes offline
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BAMonitorService(const char *name,
                          const char *type,
                          LONG checkInterval,
@@ -383,7 +447,16 @@ LONG BAMonitorService(const char *name,
     return result;
 }
 
-/* Get multiple services */
+/**
+ * BAGetServices - Get a list of services of a specific type
+ * 
+ * Retrieves all currently known services of the specified type.
+ * 
+ * @param type Service type to query
+ * @param services Array to store found services
+ * @param numServices Pointer to store number of services found
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BAGetServices(const char *type,
                       struct BAService *services,
                       ULONG *numServices)
@@ -422,7 +495,15 @@ LONG BAGetServices(const char *type,
     return result;
 }
 
-/* Set configuration */
+/**
+ * BASetConfig - Set library configuration
+ * 
+ * Updates the library's configuration settings.
+ * 
+ * @param config Pointer to BAConfig structure with new settings
+ * @return BA_OK if successful, error code otherwise
+ * @see BAConfig
+ */
 LONG BASetConfig(struct BAConfig *config)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
@@ -453,7 +534,14 @@ LONG BASetConfig(struct BAConfig *config)
     return result;
 }
 
-/* Get configuration */
+/**
+ * BAGetConfig - Get current library configuration
+ * 
+ * Retrieves the current library configuration settings.
+ * 
+ * @param config Pointer to BAConfig structure to store settings
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BAGetConfig(struct BAConfig *config)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
@@ -536,7 +624,16 @@ static void monitorTask(void *arg)
     }
 }
 
-/* Resolve service */
+/**
+ * BAGetServiceInfo - Get detailed information about a service
+ * 
+ * Resolves a specific service instance to get its complete information.
+ * 
+ * @param info Pointer to BAServiceInfo structure to store service details
+ * @param name Service instance name
+ * @param type Service type
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BAGetServiceInfo(struct BAServiceInfo *info, const char *name, const char *type)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
@@ -576,7 +673,15 @@ LONG BAGetServiceInfo(struct BAServiceInfo *info, const char *name, const char *
     return result;
 }
 
-/* Create TXT record */
+/**
+ * BACreateTXTRecord - Create a new TXT record
+ * 
+ * Creates a new TXT record for service metadata.
+ * 
+ * @param key Record key
+ * @param value Record value
+ * @return Pointer to new BATXTRecord, or NULL if creation fails
+ */
 struct BATXTRecord *BACreateTXTRecord(const char *key,
                                             const char *value)
 {
@@ -599,7 +704,13 @@ struct BATXTRecord *BACreateTXTRecord(const char *key,
     return record;
 }
 
-/* Free TXT record */
+/**
+ * BAFreeTXTRecord - Free a TXT record
+ * 
+ * Frees memory allocated for a TXT record.
+ * 
+ * @param record Pointer to BATXTRecord to free
+ */
 void BAFreeTXTRecord(struct BATXTRecord *record)
 {
     if (record) {
@@ -607,7 +718,15 @@ void BAFreeTXTRecord(struct BATXTRecord *record)
     }
 }
 
-/* Get interface list */
+/**
+ * BAGetInterfaces - Get list of available network interfaces
+ * 
+ * Retrieves information about all available network interfaces.
+ * 
+ * @param interfaces Array to store interface information
+ * @param numInterfaces Pointer to store number of interfaces found
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BAGetInterfaces(struct BAInterface *interfaces,
                         ULONG *numInterfaces)
 {
@@ -640,7 +759,14 @@ LONG BAGetInterfaces(struct BAInterface *interfaces,
     return result;
 }
 
-/* Set preferred interface */
+/**
+ * BASetPreferredInterface - Set the preferred network interface
+ * 
+ * Sets the network interface to use for service advertisement and discovery.
+ * 
+ * @param interface Name of the interface to use
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BASetPreferredInterface(const char *interface)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
@@ -667,7 +793,16 @@ LONG BASetPreferredInterface(const char *interface)
     return result;
 }
 
-/* Update service */
+/**
+ * BAUpdateService - Update service information
+ * 
+ * Updates the TXT records for a registered service.
+ * 
+ * @param name Service instance name
+ * @param type Service type
+ * @param txt New TXT records
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BAUpdateService(const char *name,
                         const char *type,
                         struct BATXTRecord *txt)
@@ -698,7 +833,17 @@ LONG BAUpdateService(const char *name,
     return result;
 }
 
-/* Register service update callback */
+/**
+ * BARegisterUpdateCallback - Register callback for service updates
+ * 
+ * Registers a callback function to be called when a service's information changes.
+ * 
+ * @param name Service instance name
+ * @param type Service type
+ * @param cb Callback function
+ * @param userData User data passed to callback
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BARegisterUpdateCallback(const char *name,
                                 const char *type,
                                 BAServiceCallback cb,
@@ -729,7 +874,15 @@ LONG BARegisterUpdateCallback(const char *name,
     return result;
 }
 
-/* Unregister service update callback */
+/**
+ * BAUnregisterUpdateCallback - Remove service update callback
+ * 
+ * Removes a previously registered service update callback.
+ * 
+ * @param name Service instance name
+ * @param type Service type
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BAUnregisterUpdateCallback(const char *name,
                                   const char *type)
 {
@@ -812,7 +965,14 @@ static LONG validateServiceType(const char *type)
     return BA_OK;
 }
 
-/* Enumerate all service types currently advertised */
+/**
+ * BAEnumerateServiceTypes - Get list of all advertised service types
+ * 
+ * Retrieves a list of all service types currently being advertised on the network.
+ * 
+ * @param types List to store found service types
+ * @return BA_OK if successful, error code otherwise
+ */
 LONG BAEnumerateServiceTypes(struct List *types)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
