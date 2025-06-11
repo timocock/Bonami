@@ -1,0 +1,7 @@
+.KEY BONAMID/A
+IF EXISTS SYS:Utilities/BonAmi/bonamid
+    Run >NIL: SYS:Utilities/BonAmi/bonamid
+    Echo "BonAmi mDNS daemon started"
+ELSE
+    Echo "BonAmi mDNS daemon not found"
+ENDIF 
