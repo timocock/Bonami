@@ -14,7 +14,7 @@
 #include "bonami.h"
 
 /* Version string */
-static const char version[] = "$VER: bactl 1.0 (01.01.2024)";
+static const char version[] = "$VER: bactl 40.0 (01.01.2024)";
 
 /* Memory pool sizes */
 #define POOL_PUDDLE_SIZE   4096
@@ -34,6 +34,9 @@ static struct {
     APTR memPool;     /* Memory pool for allocations */
     struct Task *mainTask;
     BOOL debug;
+    #ifdef __amigaos4__
+    struct BonAmiIFace *IBonAmi;
+    #endif
 } cmd;
 
 /* Forward declarations */
@@ -131,12 +134,38 @@ static LONG initCommand(void)
     cmd.debug = FALSE;
     cmd.mainTask = FindTask(NULL);
     
+    #ifdef __amigaos4__
+    /* Get BonAmi interface */
+    struct Library *bonamiBase = OpenLibrary("bonami.library", 40);
+    if (!bonamiBase) {
+        DeletePool(cmd.memPool);
+        return RETURN_ERROR;
+    }
+    
+    cmd.IBonAmi = (struct BonAmiIFace *)GetInterface(bonamiBase, "main", 1, NULL);
+    if (!cmd.IBonAmi) {
+        CloseLibrary(bonamiBase);
+        DeletePool(cmd.memPool);
+        return RETURN_ERROR;
+    }
+    #endif
+    
     return RETURN_OK;
 }
 
 /* Cleanup command tool */
 static void cleanupCommand(void)
 {
+    #ifdef __amigaos4__
+    /* Drop interface */
+    if (cmd.IBonAmi) {
+        struct Library *bonamiBase = cmd.IBonAmi->Data.LibBase;
+        DropInterface((struct Interface *)cmd.IBonAmi);
+        CloseLibrary(bonamiBase);
+        cmd.IBonAmi = NULL;
+    }
+    #endif
+    
     /* Delete memory pool */
     if (cmd.memPool) {
         DeletePool(cmd.memPool);
@@ -168,27 +197,47 @@ static LONG handleDiscover(struct RDArgs *args)
     
     /* Check arguments */
     if (args->RDA_Flags & RDA_TYPE) {
+        #ifdef __amigaos4__
+        txt = cmd.IBonAmi->BACreateTXTRecord();
+        #else
         txt = BACreateTXTRecord();
+        #endif
         if (!txt) {
             printf("Error: Failed to create TXT record\n");
             return RETURN_ERROR;
         }
         
         /* Add TXT record */
+        #ifdef __amigaos4__
+        result = cmd.IBonAmi->BAAddTXTRecord(txt, (char *)args->RDA_TYPE, (char *)args->RDA_NAME);
+        #else
         result = BAAddTXTRecord(txt, (char *)args->RDA_TYPE, (char *)args->RDA_NAME);
+        #endif
         if (result != BA_OK) {
             printf("Error: Failed to add TXT record\n");
+            #ifdef __amigaos4__
+            cmd.IBonAmi->BAFreeTXTRecord(txt);
+            #else
             BAFreeTXTRecord(txt);
+            #endif
             return RETURN_ERROR;
         }
     }
     
     /* Start discovery */
+    #ifdef __amigaos4__
+    result = cmd.IBonAmi->BAStartDiscovery((char *)args->RDA_TYPE, txt);
+    #else
     result = BAStartDiscovery((char *)args->RDA_TYPE, txt);
+    #endif
     if (result != BA_OK) {
         printf("Error: Failed to start discovery\n");
         if (txt) {
+            #ifdef __amigaos4__
+            cmd.IBonAmi->BAFreeTXTRecord(txt);
+            #else
             BAFreeTXTRecord(txt);
+            #endif
         }
         return RETURN_ERROR;
     }
@@ -197,12 +246,24 @@ static LONG handleDiscover(struct RDArgs *args)
     Delay(50);
     
     /* Get services */
+    #ifdef __amigaos4__
+    services = cmd.IBonAmi->BAGetServices((char *)args->RDA_TYPE);
+    #else
     services = BAGetServices((char *)args->RDA_TYPE);
+    #endif
     if (!services) {
         printf("Error: Failed to get services\n");
+        #ifdef __amigaos4__
+        cmd.IBonAmi->BAStopDiscovery((char *)args->RDA_TYPE);
+        #else
         BAStopDiscovery((char *)args->RDA_TYPE);
+        #endif
         if (txt) {
+            #ifdef __amigaos4__
+            cmd.IBonAmi->BAFreeTXTRecord(txt);
+            #else
             BAFreeTXTRecord(txt);
+            #endif
         }
         return RETURN_ERROR;
     }
@@ -223,11 +284,19 @@ static LONG handleDiscover(struct RDArgs *args)
     }
     
     /* Cleanup */
+    #ifdef __amigaos4__
+    cmd.IBonAmi->BAFreeServiceList(services);
+    cmd.IBonAmi->BAStopDiscovery((char *)args->RDA_TYPE);
+    if (txt) {
+        cmd.IBonAmi->BAFreeTXTRecord(txt);
+    }
+    #else
     BAFreeServiceList(services);
     BAStopDiscovery((char *)args->RDA_TYPE);
     if (txt) {
         BAFreeTXTRecord(txt);
     }
+    #endif
     
     return RETURN_OK;
 }
@@ -266,24 +335,44 @@ static LONG handleRegister(struct RDArgs *args)
     }
 
     /* Initialize library */
+    #ifdef __amigaos4__
+    if (cmd.IBonAmi->BAOpenLibrary() != BA_OK) {
+    #else
     if (BAOpenLibrary() != BA_OK) {
+    #endif
         printf("Error: Failed to open library\n");
         return RETURN_ERROR;
     }
     
     /* Get current config */
+    #ifdef __amigaos4__
+    if (cmd.IBonAmi->BAGetConfig(&config) != BA_OK) {
+    #else
     if (BAGetConfig(&config) != BA_OK) {
+    #endif
         printf("Error: Failed to get config\n");
+        #ifdef __amigaos4__
+        cmd.IBonAmi->BACloseLibrary();
+        #else
         BACloseLibrary();
+        #endif
         return RETURN_ERROR;
     }
     
     /* Create TXT record if specified */
     if (numTxtArgs > 0) {
+        #ifdef __amigaos4__
+        txt = cmd.IBonAmi->BACreateTXTRecord();
+        #else
         txt = BACreateTXTRecord();
+        #endif
         if (!txt) {
             printf("Error: Failed to create TXT record\n");
+            #ifdef __amigaos4__
+            cmd.IBonAmi->BACloseLibrary();
+            #else
             BACloseLibrary();
+            #endif
             return RETURN_ERROR;
         }
         
@@ -293,10 +382,19 @@ static LONG handleRegister(struct RDArgs *args)
             char *value = strchr(key, '=');
             if (value) {
                 *value++ = '\0';
+                #ifdef __amigaos4__
+                if (cmd.IBonAmi->BAAddTXTRecord(txt, key, value) != BA_OK) {
+                #else
                 if (BAAddTXTRecord(txt, key, value) != BA_OK) {
+                #endif
                     printf("Error: Failed to add TXT record\n");
+                    #ifdef __amigaos4__
+                    cmd.IBonAmi->BAFreeTXTRecord(txt);
+                    cmd.IBonAmi->BACloseLibrary();
+                    #else
                     BAFreeTXTRecord(txt);
                     BACloseLibrary();
+                    #endif
                     return RETURN_ERROR;
                 }
             }
@@ -304,20 +402,40 @@ static LONG handleRegister(struct RDArgs *args)
     }
     
     /* Register service */
+    #ifdef __amigaos4__
+    if (cmd.IBonAmi->BARegisterService(name, type, port, txt) != BA_OK) {
+    #else
     if (BARegisterService(name, type, port, txt) != BA_OK) {
+    #endif
         printf("Error: Failed to register service\n");
         if (txt) {
+            #ifdef __amigaos4__
+            cmd.IBonAmi->BAFreeTXTRecord(txt);
+            #else
             BAFreeTXTRecord(txt);
+            #endif
         }
+        #ifdef __amigaos4__
+        cmd.IBonAmi->BACloseLibrary();
+        #else
         BACloseLibrary();
+        #endif
         return RETURN_ERROR;
     }
     
     /* Cleanup */
     if (txt) {
+        #ifdef __amigaos4__
+        cmd.IBonAmi->BAFreeTXTRecord(txt);
+        #else
         BAFreeTXTRecord(txt);
+        #endif
     }
+    #ifdef __amigaos4__
+    cmd.IBonAmi->BACloseLibrary();
+    #else
     BACloseLibrary();
+    #endif
     
     printf("Service registered successfully\n");
     return RETURN_OK;
@@ -344,7 +462,11 @@ static LONG handleUnregister(struct RDArgs *args) {
     }
 
     /* Unregister service */
+    #ifdef __amigaos4__
+    if (cmd.IBonAmi->BAUnregisterService(name, type) != BA_OK) {
+    #else
     if (BAUnregisterService(name, type) != BA_OK) {
+    #endif
         printf("Error: Failed to unregister service\n");
         return RETURN_ERROR;
     }
@@ -375,7 +497,11 @@ static LONG handleList(struct RDArgs *args) {
     NewList(&services);
 
     /* Enumerate services */
+    #ifdef __amigaos4__
+    if (cmd.IBonAmi->BAEnumerateServices(&services, type) != BA_OK) {
+    #else
     if (BAEnumerateServices(&services, type) != BA_OK) {
+    #endif
         printf("Error: Failed to enumerate services\n");
         return RETURN_ERROR;
     }
@@ -411,7 +537,11 @@ static LONG handleResolve(struct RDArgs *args) {
     }
 
     /* Resolve service */
+    #ifdef __amigaos4__
+    if (cmd.IBonAmi->BAGetServiceInfo(&info, name, type) != BA_OK) {
+    #else
     if (BAGetServiceInfo(&info, name, type) != BA_OK) {
+    #endif
         printf("Error: Failed to resolve service\n");
         return RETURN_ERROR;
     }
@@ -455,7 +585,11 @@ static LONG handleMonitor(struct RDArgs *args) {
     }
 
     /* Monitor service */
+    #ifdef __amigaos4__
+    if (cmd.IBonAmi->BAMonitorService(name, type, interval, notify) != BA_OK) {
+    #else
     if (BAMonitorService(name, type, interval, notify) != BA_OK) {
+    #endif
         printf("Error: Failed to monitor service\n");
         return RETURN_ERROR;
     }
@@ -490,7 +624,11 @@ static LONG handleConfig(struct RDArgs *args) {
     }
 
     /* Get current config */
+    #ifdef __amigaos4__
+    if (cmd.IBonAmi->BAGetConfig(&config) != BA_OK) {
+    #else
     if (BAGetConfig(&config) != BA_OK) {
+    #endif
         printf("Error: Failed to get current configuration\n");
         return RETURN_ERROR;
     }
@@ -514,7 +652,11 @@ static LONG handleConfig(struct RDArgs *args) {
     }
 
     /* Set new config */
+    #ifdef __amigaos4__
+    if (cmd.IBonAmi->BASetConfig(&config) != BA_OK) {
+    #else
     if (BASetConfig(&config) != BA_OK) {
+    #endif
         printf("Error: Failed to set configuration\n");
         return RETURN_ERROR;
     }
@@ -530,13 +672,21 @@ static LONG handleStatus(struct RDArgs *args) {
     ULONG numInterfaces = MAX_INTERFACES;
 
     /* Get configuration */
+    #ifdef __amigaos4__
+    if (cmd.IBonAmi->BAGetConfig(&config) != BA_OK) {
+    #else
     if (BAGetConfig(&config) != BA_OK) {
+    #endif
         printf("Error: Failed to get configuration\n");
         return RETURN_ERROR;
     }
 
     /* Get interfaces */
+    #ifdef __amigaos4__
+    if (cmd.IBonAmi->BAGetInterfaces(interfaces, &numInterfaces) != BA_OK) {
+    #else
     if (BAGetInterfaces(interfaces, &numInterfaces) != BA_OK) {
+    #endif
         printf("Error: Failed to get interfaces\n");
         return RETURN_ERROR;
     }

@@ -17,6 +17,9 @@ static const char *version = "$VER: test_bonami 40.0 (01.01.2024)";
 /* Test state */
 struct TestState {
     struct Library *BonAmiBase;
+    #ifdef __amigaos4__
+    struct BonAmiIFace *IBonAmi;
+    #endif
     struct BAConfig config;
     struct BATXTRecord *txt;
     BOOL success;
@@ -92,7 +95,7 @@ int main(int argc, char **argv)
         result = RETURN_ERROR;
     }
     
-    if (runTest("Error Handling", testErrorHandling) != RETURN_OK) {
+    if (runTest("Error Handling", testErrorHandling) != RETURN_ERROR) {
         printf("Error handling tests failed\n");
         result = RETURN_ERROR;
     }
@@ -121,21 +124,51 @@ static LONG runTest(const char *name, LONG (*testFunc)(struct TestState *))
 static LONG testLibraryOpen(struct TestState *state)
 {
     /* Open library */
-    state->BonAmiBase = OpenLibrary("bonami.library", 40);
+    #ifdef __amigaos4__
+    state->BonAmiBase = IExec->OpenLibrary("bonami.library", 40);
     if (!state->BonAmiBase) {
         printf("Failed to open bonami.library\n");
         return RETURN_ERROR;
     }
     
+    state->IBonAmi = (struct BonAmiIFace *)IExec->GetInterface(state->BonAmiBase, "main", 1, NULL);
+    if (!state->IBonAmi) {
+        printf("Failed to get BonAmi interface\n");
+        IExec->CloseLibrary(state->BonAmiBase);
+        return RETURN_ERROR;
+    }
+    #else
+    state->BonAmiBase = OpenLibrary("bonami.library", 40);
+    if (!state->BonAmiBase) {
+        printf("Failed to open bonami.library\n");
+        return RETURN_ERROR;
+    }
+    #endif
+    
     /* Get config */
+    #ifdef __amigaos4__
+    if (state->IBonAmi->BAGetConfig(&state->config) != BA_OK) {
+    #else
     if (BAGetConfig(&state->config) != BA_OK) {
+    #endif
         printf("Failed to get config\n");
+        #ifdef __amigaos4__
+        IExec->DropInterface((struct Interface *)state->IBonAmi);
+        IExec->CloseLibrary(state->BonAmiBase);
+        #else
         CloseLibrary(state->BonAmiBase);
+        #endif
         return RETURN_ERROR;
     }
     
     /* Close library */
+    #ifdef __amigaos4__
+    IExec->DropInterface((struct Interface *)state->IBonAmi);
+    IExec->CloseLibrary(state->BonAmiBase);
+    state->IBonAmi = NULL;
+    #else
     CloseLibrary(state->BonAmiBase);
+    #endif
     state->BonAmiBase = NULL;
     
     return RETURN_OK;
@@ -147,32 +180,75 @@ static LONG testServiceRegistration(struct TestState *state)
     LONG result;
     
     /* Open library */
-    state->BonAmiBase = OpenLibrary("bonami.library", 0);
+    #ifdef __amigaos4__
+    state->BonAmiBase = IExec->OpenLibrary("bonami.library", 40);
     if (!state->BonAmiBase) {
         return RETURN_ERROR;
     }
     
+    state->IBonAmi = (struct BonAmiIFace *)IExec->GetInterface(state->BonAmiBase, "main", 1, NULL);
+    if (!state->IBonAmi) {
+        IExec->CloseLibrary(state->BonAmiBase);
+        return RETURN_ERROR;
+    }
+    #else
+    state->BonAmiBase = OpenLibrary("bonami.library", 40);
+    if (!state->BonAmiBase) {
+        return RETURN_ERROR;
+    }
+    #endif
+    
     /* Create TXT record */
+    #ifdef __amigaos4__
+    state->txt = state->IBonAmi->BACreateTXTRecord();
+    #else
     state->txt = BACreateTXTRecord();
+    #endif
     if (!state->txt) {
+        #ifdef __amigaos4__
+        IExec->DropInterface((struct Interface *)state->IBonAmi);
+        IExec->CloseLibrary(state->BonAmiBase);
+        #else
         CloseLibrary(state->BonAmiBase);
+        #endif
         return RETURN_ERROR;
     }
     
     /* Add TXT record */
+    #ifdef __amigaos4__
+    result = state->IBonAmi->BAAddTXTRecord(state->txt, "test-key", "test-value");
+    #else
     result = BAAddTXTRecord(state->txt, "test-key", "test-value");
+    #endif
     if (result != BA_OK) {
+        #ifdef __amigaos4__
+        state->IBonAmi->BAFreeTXTRecord(state->txt);
+        IExec->DropInterface((struct Interface *)state->IBonAmi);
+        IExec->CloseLibrary(state->BonAmiBase);
+        #else
         BAFreeTXTRecord(state->txt);
         CloseLibrary(state->BonAmiBase);
+        #endif
         return RETURN_ERROR;
     }
     
     /* Register service */
+    #ifdef __amigaos4__
+    result = state->IBonAmi->BARegisterService(TEST_SERVICE_NAME, TEST_SERVICE_TYPE, 
+                                             TEST_SERVICE_PORT, state->txt);
+    #else
     result = BARegisterService(TEST_SERVICE_NAME, TEST_SERVICE_TYPE, 
                              TEST_SERVICE_PORT, state->txt);
+    #endif
     if (result != BA_OK) {
+        #ifdef __amigaos4__
+        state->IBonAmi->BAFreeTXTRecord(state->txt);
+        IExec->DropInterface((struct Interface *)state->IBonAmi);
+        IExec->CloseLibrary(state->BonAmiBase);
+        #else
         BAFreeTXTRecord(state->txt);
         CloseLibrary(state->BonAmiBase);
+        #endif
         return RETURN_ERROR;
     }
     
@@ -180,16 +256,33 @@ static LONG testServiceRegistration(struct TestState *state)
     Delay(50);
     
     /* Unregister service */
+    #ifdef __amigaos4__
+    result = state->IBonAmi->BAUnregisterService(TEST_SERVICE_NAME);
+    #else
     result = BAUnregisterService(TEST_SERVICE_NAME);
+    #endif
     if (result != BA_OK) {
+        #ifdef __amigaos4__
+        state->IBonAmi->BAFreeTXTRecord(state->txt);
+        IExec->DropInterface((struct Interface *)state->IBonAmi);
+        IExec->CloseLibrary(state->BonAmiBase);
+        #else
         BAFreeTXTRecord(state->txt);
         CloseLibrary(state->BonAmiBase);
+        #endif
         return RETURN_ERROR;
     }
     
     /* Cleanup */
+    #ifdef __amigaos4__
+    state->IBonAmi->BAFreeTXTRecord(state->txt);
+    IExec->DropInterface((struct Interface *)state->IBonAmi);
+    IExec->CloseLibrary(state->BonAmiBase);
+    state->IBonAmi = NULL;
+    #else
     BAFreeTXTRecord(state->txt);
     CloseLibrary(state->BonAmiBase);
+    #endif
     state->BonAmiBase = NULL;
     state->txt = NULL;
     
