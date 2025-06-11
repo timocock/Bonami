@@ -56,6 +56,7 @@ struct BAMessage {
         struct {
             char name[BA_MAX_NAME_LEN];
             char type[BA_MAX_SERVICE_LEN];
+            struct BAMonitor *monitor;
             LONG interval;
             BOOL notify;
             LONG result;
@@ -73,6 +74,9 @@ struct BABase {
     struct SignalSemaphore lock;
     struct MsgPort *replyPort;
     struct Task *mainTask;
+    struct List monitors;
+    struct List updateCallbacks;
+    struct BAConfig config;
     ULONG flags;
 };
 
@@ -104,6 +108,17 @@ struct Library *OpenLibrary(void)
     /* Initialize semaphore */
     InitSemaphore(&base->lock);
     
+    /* Initialize lists */
+    NewList(&base->monitors);
+    NewList(&base->updateCallbacks);
+    
+    /* Initialize config */
+    memset(&base->config, 0, sizeof(struct BAConfig));
+    base->config.discoveryTimeout = 5;
+    base->config.resolveTimeout = 2;
+    base->config.ttl = 120;
+    base->config.autoReconnect = TRUE;
+    
     /* Create reply port */
     base->replyPort = CreateMsgPort();
     if (!base->replyPort) {
@@ -126,6 +141,18 @@ struct Library *OpenLibrary(void)
 void CloseLibrary(void)
 {
     struct BABase *base = (struct BABase *)SysBase->LibNode;
+    
+    /* Free monitors */
+    while (!IsListEmpty(&base->monitors)) {
+        struct BAMonitor *monitor = (struct BAMonitor *)RemHead(&base->monitors);
+        FreeMem(monitor, sizeof(struct BAMonitor));
+    }
+    
+    /* Free update callbacks */
+    while (!IsListEmpty(&base->updateCallbacks)) {
+        struct BAUpdateCallback *cb = (struct BAUpdateCallback *)RemHead(&base->updateCallbacks);
+        FreeMem(cb, sizeof(struct BAUpdateCallback));
+    }
     
     if (base->replyPort) {
         DeleteMsgPort(base->replyPort);
