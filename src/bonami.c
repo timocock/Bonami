@@ -43,6 +43,7 @@ static const char version[] = "$VER: Bonami 40.0 (01.01.2024)";
 #define DISCOVERY_TIMEOUT 5
 #define RESOLVE_TIMEOUT 2
 #define MAX_MULTICAST_ADDRESSES 32
+#define INTERFACE_CHECK_INTERVAL 5  /* Check interfaces every 5 seconds */
 
 /* Multicast modes */
 #define MULTICAST_MODE_AUTO 0
@@ -142,6 +143,8 @@ struct InterfaceState {
     struct List questions;  /* DNS questions on this interface */
     LONG socket;          /* Socket for this interface */
     char name[32];        /* Interface name */
+    BOOL online;          /* Whether interface is online */
+    LONG lastOnlineCheck; /* Last time we checked if interface was online */
 };
 
 /* Cache entry */
@@ -273,6 +276,9 @@ static void orphanTask(void);
 static void processDNSMessage(struct InterfaceState *iface, struct DNSMessage *msg);
 static void processQuestion(struct InterfaceState *iface, struct DNSQuestion *question);
 static void processRecord(struct InterfaceState *iface, struct DNSRecord *record);
+static BOOL isInterfaceOnline(struct InterfaceState *iface);
+static void checkInterfaces(void);
+static void mainTask(void);
 
 /* Main function */
 int main(int argc, char **argv) {
@@ -2660,4 +2666,128 @@ static LONG receiveDNSMessage(struct InterfaceState *iface, struct DNSMessage *m
     }
     
     return BA_OK;
+}
+
+/* Check if interface is online */
+static BOOL isInterfaceOnline(struct InterfaceState *iface)
+{
+    struct ifreq ifr;
+    LONG now = time(NULL);
+    
+    /* Don't check too frequently */
+    if (now - iface->lastOnlineCheck < INTERFACE_CHECK_INTERVAL) {
+        return iface->online;
+    }
+    
+    /* Get interface flags */
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, iface->name, sizeof(ifr.ifr_name) - 1);
+    
+    if (ioctl(bonami.socket, SIOCGIFFLAGS, &ifr) < 0) {
+        logMessage(LOG_ERROR, "Failed to get interface flags for %s: %s", 
+                  iface->name, strerror(errno));
+        return FALSE;
+    }
+    
+    /* Check if interface is up and running */
+    BOOL wasOnline = iface->online;
+    iface->online = (ifr.ifr_flags & IFF_UP) && (ifr.ifr_flags & IFF_RUNNING);
+    iface->lastOnlineCheck = now;
+    
+    /* Log state change */
+    if (wasOnline != iface->online) {
+        logMessage(LOG_INFO, "Interface %s is now %s", 
+                  iface->name, iface->online ? "online" : "offline");
+    }
+    
+    return iface->online;
+}
+
+/* Check all interfaces */
+static void checkInterfaces(void)
+{
+    struct InterfaceState *iface;
+    LONG i;
+    BOOL anyOnline = FALSE;
+    
+    for (i = 0; i < bonami.num_interfaces; i++) {
+        iface = &bonami.interfaces[i];
+        
+        if (isInterfaceOnline(iface)) {
+            anyOnline = TRUE;
+            
+            /* If interface was offline, reinitialize it */
+            if (!iface->active) {
+                logMessage(LOG_INFO, "Reinitializing interface %s", iface->name);
+                
+                /* Initialize multicast */
+                if (initMulticast(iface) == BA_OK) {
+                    iface->active = TRUE;
+                    
+                    /* Reannounce services */
+                    struct Service *service;
+                    for (service = (struct Service *)iface->services.lh_Head;
+                         service->node.ln_Succ;
+                         service = (struct Service *)service->node.ln_Succ) {
+                        startAnnouncement(service);
+                    }
+                }
+            }
+        } else if (iface->active) {
+            /* Interface went offline, cleanup */
+            logMessage(LOG_INFO, "Interface %s went offline", iface->name);
+            cleanupMulticast(iface);
+            iface->active = FALSE;
+        }
+    }
+    
+    /* If no interfaces are online, sleep */
+    if (!anyOnline) {
+        logMessage(LOG_INFO, "No interfaces online, sleeping...");
+        Delay(INTERFACE_CHECK_INTERVAL * 50); /* Convert seconds to ticks */
+    }
+}
+
+/* Main task */
+static void mainTask(void)
+{
+    struct InterfaceState *iface;
+    LONG i;
+    BOOL running = TRUE;
+    
+    /* Initialize interfaces */
+    if (initInterfaces() != BA_OK) {
+        logMessage(LOG_ERROR, "Failed to initialize interfaces");
+        return;
+    }
+    
+    /* Main loop */
+    while (running) {
+        /* Check interfaces */
+        checkInterfaces();
+        
+        /* Process each active interface */
+        for (i = 0; i < bonami.num_interfaces; i++) {
+            iface = &bonami.interfaces[i];
+            
+            if (!iface->active || !iface->online) {
+                continue;
+            }
+            
+            /* Process probes */
+            processProbes(iface);
+            
+            /* Process announcements */
+            processAnnouncements(iface);
+            
+            /* Process DNS messages */
+            processDNSMessages(iface);
+        }
+        
+        /* Small delay to prevent CPU hogging */
+        Delay(1);
+    }
+    
+    /* Cleanup */
+    cleanupInterfaces();
 }
