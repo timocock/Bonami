@@ -30,6 +30,7 @@ static const char version[] = "$VER: Bonami 40.0 (01.01.2024)";
 #define CONFIG_INTERFACES "ENV:Bonami/interfaces"
 #define CONFIG_HOSTS_FILE "ENV:Bonami/hosts_file"
 #define CONFIG_UPDATE_HOSTS "ENV:Bonami/update_hosts"
+#define CONFIG_MULTICAST_MODE "ENV:Bonami/multicast_mode"
 #define MAX_INTERFACES 16
 #define CACHE_TIMEOUT 300
 #define PROBE_WAIT 250     /* 250ms between probes */
@@ -41,6 +42,20 @@ static const char version[] = "$VER: Bonami 40.0 (01.01.2024)";
 #define MAX_CACHE_ENTRIES 1024
 #define DISCOVERY_TIMEOUT 5
 #define RESOLVE_TIMEOUT 2
+#define MAX_MULTICAST_ADDRESSES 32
+
+/* Multicast modes */
+#define MULTICAST_MODE_AUTO 0
+#define MULTICAST_MODE_SINGLE 1
+#define MULTICAST_MODE_MULTIPLE 2
+#define MULTICAST_MODE_ORPHAN 3
+
+/* SANA-II commands */
+#define S2_ADDMULTICASTADDRESS 0x8001
+#define S2_REMMULTICASTADDRESS 0x8002
+#define S2_ADDMULTICASTADDRESSES 0x8003
+#define S2_DELMULTICASTADDRESSES 0x8004
+#define S2_READORPHAN 0x8005
 
 /* Log levels */
 #define LOG_ERROR 0
@@ -125,6 +140,11 @@ struct InterfaceState {
     struct List announces; /* Services being announced */
     struct List records;   /* DNS records on this interface */
     struct List questions;  /* DNS questions on this interface */
+    LONG multicastMode;    /* Current multicast mode */
+    struct in_addr multicastAddrs[MAX_MULTICAST_ADDRESSES]; /* Multicast addresses */
+    LONG numMulticastAddrs; /* Number of multicast addresses */
+    BOOL orphanMode;      /* Whether using orphan mode */
+    struct Task *orphanTask; /* Task for orphan mode */
 };
 
 /* Cache entry */
@@ -250,6 +270,12 @@ static LONG sendQuery(struct InterfaceState *iface, struct DNSQuery *query);
 static void cleanupList(struct List *list);
 static APTR AllocPooled(ULONG size);
 static void FreePooled(APTR memory, ULONG size);
+static LONG initMulticast(struct InterfaceState *iface);
+static void cleanupMulticast(struct InterfaceState *iface);
+static void orphanTask(void);
+static void processDNSMessage(struct InterfaceState *iface, struct DNSMessage *msg);
+static void processQuestion(struct InterfaceState *iface, struct DNSQuestion *question);
+static void processRecord(struct InterfaceState *iface, struct DNSRecord *record);
 
 /* Main function */
 int main(int argc, char **argv) {
@@ -2199,116 +2225,233 @@ static void FreePooled(APTR memory, ULONG size)
     FreePooled(bonami.memPool, memory, size);
 }
 
-/* Process monitor message */
-static LONG processMonitorMessage(struct BAMessage *msg)
+/* Initialize multicast for interface */
+static LONG initMulticast(struct InterfaceState *iface)
 {
-    struct MonitorNode *monitor;
-    LONG result = BA_OK;
+    struct TagItem tags[4];
+    LONG result;
+    struct in_addr maddr;
     
-    /* Check if monitor already exists */
-    for (monitor = (struct MonitorNode *)bonami.monitors.lh_Head;
-         monitor->node.ln_Succ;
-         monitor = (struct MonitorNode *)monitor->node.ln_Succ) {
-        if (strcmp(monitor->name, msg->data.monitor_msg.name) == 0 &&
-            strcmp(monitor->type, msg->data.monitor_msg.type) == 0) {
-            return BA_EXISTS;
-        }
+    /* Convert multicast address */
+    maddr.s_addr = inet_addr(MDNS_MULTICAST_ADDR);
+    
+    /* Try newer SANA-II commands first */
+    tags[0].ti_Tag = S2_ADDMULTICASTADDRESSES;
+    tags[0].ti_Data = (ULONG)&maddr;
+    tags[1].ti_Tag = TAG_END;
+    
+    result = DoPkt(iface->socket, ACTION_SANA_COMMAND, tags, NULL);
+    if (result == 0) {
+        /* Success with newer commands */
+        iface->multicastMode = MULTICAST_MODE_MULTIPLE;
+        iface->multicastAddrs[0] = maddr;
+        iface->numMulticastAddrs = 1;
+        return BA_OK;
     }
     
-    /* Create monitor node */
-    monitor = AllocPooled(sizeof(struct BAMonitorNode));
-    if (!monitor) {
+    /* Try older SANA-II commands */
+    tags[0].ti_Tag = S2_ADDMULTICASTADDRESS;
+    tags[0].ti_Data = (ULONG)&maddr;
+    tags[1].ti_Tag = TAG_END;
+    
+    result = DoPkt(iface->socket, ACTION_SANA_COMMAND, tags, NULL);
+    if (result == 0) {
+        /* Success with older commands */
+        iface->multicastMode = MULTICAST_MODE_SINGLE;
+        iface->multicastAddrs[0] = maddr;
+        iface->numMulticastAddrs = 1;
+        return BA_OK;
+    }
+    
+    /* Fall back to orphan mode */
+    iface->multicastMode = MULTICAST_MODE_ORPHAN;
+    iface->orphanMode = TRUE;
+    
+    /* Start orphan task */
+    iface->orphanTask = CreateTask("BonAmi Orphan",
+                                 -1,
+                                 orphanTask,
+                                 8192);
+    if (!iface->orphanTask) {
         return BA_NOMEM;
-    }
-    
-    /* Initialize monitor */
-    monitor->monitor.name = AllocPooled(strlen(msg->data.monitor_msg.name) + 1);
-    monitor->monitor.type = AllocPooled(strlen(msg->data.monitor_msg.type) + 1);
-    if (!monitor->monitor.name || !monitor->monitor.type) {
-        if (monitor->monitor.name) FreePooled(monitor->monitor.name, strlen(monitor->monitor.name) + 1);
-        if (monitor->monitor.type) FreePooled(monitor->monitor.type, strlen(monitor->monitor.type) + 1);
-        FreePooled(monitor, sizeof(struct BAMonitorNode));
-        return BA_NOMEM;
-    }
-    
-    strcpy(monitor->monitor.name, msg->data.monitor_msg.name);
-    strcpy(monitor->monitor.type, msg->data.monitor_msg.type);
-    monitor->monitor.checkInterval = msg->data.monitor_msg.interval;
-    monitor->monitor.notifyOffline = msg->data.monitor_msg.notify;
-    monitor->monitor.lastCheck = 0;
-    monitor->monitor.state = MONITOR_STATE_ACTIVE;
-    
-    /* Add to list */
-    AddTail(&bonami.monitors, &monitor->node);
-    
-    return result;
-}
-
-/* Process get interface message */
-static LONG processGetInterfaceMessage(struct BAMessage *msg)
-{
-    struct InterfaceNode *iface;
-    LONG result = BA_NOTFOUND;
-    
-    /* Find interface */
-    for (iface = (struct InterfaceNode *)bonami.interfaces.lh_Head;
-         iface->node.ln_Succ;
-         iface = (struct InterfaceNode *)iface->node.ln_Succ) {
-        if (strcmp(iface->name, msg->data.interface_msg.interface->name) == 0) {
-            /* Copy interface info */
-            msg->data.interface_msg.interface->addr = iface->addr;
-            msg->data.interface_msg.interface->up = iface->up;
-            result = BA_OK;
-            break;
-        }
-    }
-    
-    return result;
-}
-
-/* Process get status message */
-static LONG processGetStatusMessage(struct BAMessage *msg)
-{
-    struct ServiceNode *service;
-    struct DiscoveryNode *discovery;
-    struct MonitorNode *monitor;
-    struct BAStatus *status = msg->data.status_msg.status;
-    
-    /* Initialize status */
-    status->numServices = 0;
-    status->numDiscoveries = 0;
-    status->numMonitors = 0;
-    status->numInterfaces = 0;
-    
-    /* Count services */
-    for (service = (struct ServiceNode *)bonami.services.lh_Head;
-         service->node.ln_Succ;
-         service = (struct ServiceNode *)service->node.ln_Succ) {
-        status->numServices++;
-    }
-    
-    /* Count discoveries */
-    for (discovery = (struct DiscoveryNode *)bonami.discoveries.lh_Head;
-         discovery->node.ln_Succ;
-         discovery = (struct DiscoveryNode *)discovery->node.ln_Succ) {
-        status->numDiscoveries++;
-    }
-    
-    /* Count monitors */
-    for (monitor = (struct MonitorNode *)bonami.monitors.lh_Head;
-         monitor->node.ln_Succ;
-         monitor = (struct MonitorNode *)monitor->node.ln_Succ) {
-        status->numMonitors++;
-    }
-    
-    /* Count interfaces */
-    for (struct InterfaceNode *iface = (struct InterfaceNode *)bonami.interfaces.lh_Head;
-         iface->node.ln_Succ;
-         iface = (struct InterfaceNode *)iface->node.ln_Succ) {
-        status->numInterfaces++;
     }
     
     return BA_OK;
+}
+
+/* Cleanup multicast for interface */
+static void cleanupMulticast(struct InterfaceState *iface)
+{
+    struct TagItem tags[4];
+    
+    if (iface->orphanMode) {
+        /* Stop orphan task */
+        if (iface->orphanTask) {
+            Signal(iface->orphanTask, SIGBREAKF_CTRL_C);
+            Wait(0, SIGBREAKF_CTRL_C);
+            iface->orphanTask = NULL;
+        }
+        return;
+    }
+    
+    /* Remove multicast addresses */
+    if (iface->multicastMode == MULTICAST_MODE_MULTIPLE) {
+        tags[0].ti_Tag = S2_DELMULTICASTADDRESSES;
+        tags[0].ti_Data = (ULONG)iface->multicastAddrs;
+        tags[1].ti_Tag = TAG_END;
+    } else {
+        tags[0].ti_Tag = S2_REMMULTICASTADDRESS;
+        tags[0].ti_Data = (ULONG)&iface->multicastAddrs[0];
+        tags[1].ti_Tag = TAG_END;
+    }
+    
+    DoPkt(iface->socket, ACTION_SANA_COMMAND, tags, NULL);
+}
+
+/* Orphan task */
+static void orphanTask(void)
+{
+    struct InterfaceState *iface = FindTask(NULL)->tc_UserData;
+    struct DNSMessage msg;
+    struct sockaddr_in addr;
+    LONG result;
+    
+    while (bonami.running) {
+        /* Read orphan packet */
+        result = DoPkt(iface->socket, S2_READORPHAN, &msg, sizeof(msg));
+        if (result < 0) {
+            Delay(10);
+            continue;
+        }
+        
+        /* Check if it's a multicast packet */
+        if (msg.header.id == 0 && /* mDNS uses 0 for ID */
+            msg.header.flags & DNS_FLAG_QUERY &&
+            msg.header.qdcount > 0) {
+            
+            /* Process DNS message */
+            processDNSMessage(iface, &msg);
+        }
+        
+        Delay(10);
+    }
+}
+
+/* Process DNS message */
+static void processDNSMessage(struct InterfaceState *iface, struct DNSMessage *msg)
+{
+    struct DNSQuestion *question;
+    struct DNSRecord *record;
+    LONG i;
+    
+    /* Validate message */
+    if (validateDNSMessage(msg) != BA_OK) {
+        return;
+    }
+    
+    /* Process questions */
+    for (i = 0; i < msg->header.qdcount; i++) {
+        question = &msg->questions[i];
+        
+        /* Check if it's a .local domain */
+        if (strstr(question->name, ".local")) {
+            /* Process question */
+            processQuestion(iface, question);
+        }
+    }
+    
+    /* Process answers */
+    for (i = 0; i < msg->header.ancount; i++) {
+        record = &msg->answers[i];
+        
+        /* Check if it's a .local domain */
+        if (strstr(record->name, ".local")) {
+            /* Process record */
+            processRecord(iface, record);
+        }
+    }
+    
+    /* Process authority */
+    for (i = 0; i < msg->header.nscount; i++) {
+        record = &msg->authority[i];
+        
+        /* Check if it's a .local domain */
+        if (strstr(record->name, ".local")) {
+            /* Process record */
+            processRecord(iface, record);
+        }
+    }
+    
+    /* Process additional */
+    for (i = 0; i < msg->header.arcount; i++) {
+        record = &msg->additional[i];
+        
+        /* Check if it's a .local domain */
+        if (strstr(record->name, ".local")) {
+            /* Process record */
+            processRecord(iface, record);
+        }
+    }
+}
+
+/* Process DNS question */
+static void processQuestion(struct InterfaceState *iface, struct DNSQuestion *question)
+{
+    struct DNSRecord *record;
+    struct DNSMessage response;
+    struct sockaddr_in addr;
+    LONG result;
+    
+    /* Check if we have a matching record */
+    for (record = (struct DNSRecord *)iface->records.lh_Head;
+         record->node.ln_Succ;
+         record = (struct DNSRecord *)record->node.ln_Succ) {
+        if (strcmp(record->name, question->name) == 0 &&
+            record->type == question->type &&
+            record->class == question->class) {
+            
+            /* Create response */
+            memset(&response, 0, sizeof(response));
+            response.header.id = 0;
+            response.header.flags = DNS_FLAG_RESPONSE;
+            response.header.ancount = 1;
+            
+            /* Copy record */
+            memcpy(&response.answers[0], record, sizeof(struct DNSRecord));
+            
+            /* Send response */
+            memset(&addr, 0, sizeof(addr));
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = inet_addr(MDNS_MULTICAST_ADDR);
+            addr.sin_port = htons(MDNS_PORT);
+            
+            result = sendto(iface->socket, &response, sizeof(response), 0,
+                          (struct sockaddr *)&addr, sizeof(addr));
+            if (result < 0) {
+                logMessage(LOG_ERROR, "Failed to send response: %s", strerror(errno));
+            }
+            
+            break;
+        }
+    }
+}
+
+/* Process DNS record */
+static void processRecord(struct InterfaceState *iface, struct DNSRecord *record)
+{
+    struct CacheEntry *entry;
+    
+    /* Check if we already have this record */
+    entry = findCacheEntry(record->name, record->type, record->class);
+    if (entry) {
+        /* Update existing entry */
+        memcpy(entry->data, record, sizeof(struct DNSRecord));
+        entry->ttl = record->ttl;
+        entry->expires = GetSysTime() + record->ttl;
+    } else {
+        /* Add new entry */
+        addCacheEntry(record->name, record->type, record->class, record, record->ttl);
+    }
 }
 
 /* Update hosts file */
@@ -2349,4 +2492,166 @@ static LONG updateHostsFile(void)
     /* Close file */
     Close(file);
     return BA_OK;
-} 
+}
+
+/* DNS message header */
+struct DNSHeader {
+    WORD id;
+    WORD flags;
+    WORD qdcount;
+    WORD ancount;
+    WORD nscount;
+    WORD arcount;
+};
+
+/* DNS message */
+struct DNSMessage {
+    struct DNSHeader header;
+    struct DNSQuestion questions[MAX_QUESTIONS];
+    struct DNSRecord answers[MAX_ANSWERS];
+    struct DNSRecord authority[MAX_AUTHORITY];
+    struct DNSRecord additional[MAX_ADDITIONAL];
+};
+
+/* Validate DNS message */
+static LONG validateDNSMessage(struct DNSMessage *msg)
+{
+    /* Check header */
+    if (msg->header.qdcount > MAX_QUESTIONS ||
+        msg->header.ancount > MAX_ANSWERS ||
+        msg->header.nscount > MAX_AUTHORITY ||
+        msg->header.arcount > MAX_ADDITIONAL) {
+        return BA_BADPARAM;
+    }
+    
+    /* Check questions */
+    for (LONG i = 0; i < msg->header.qdcount; i++) {
+        if (!msg->questions[i].name[0] ||
+            strlen(msg->questions[i].name) > 255) {
+            return BA_BADPARAM;
+        }
+    }
+    
+    /* Check answers */
+    for (LONG i = 0; i < msg->header.ancount; i++) {
+        if (!msg->answers[i].name[0] ||
+            strlen(msg->answers[i].name) > 255 ||
+            msg->answers[i].rdlength > 65535) {
+            return BA_BADPARAM;
+        }
+    }
+    
+    /* Check authority */
+    for (LONG i = 0; i < msg->header.nscount; i++) {
+        if (!msg->authority[i].name[0] ||
+            strlen(msg->authority[i].name) > 255 ||
+            msg->authority[i].rdlength > 65535) {
+            return BA_BADPARAM;
+        }
+    }
+    
+    /* Check additional */
+    for (LONG i = 0; i < msg->header.arcount; i++) {
+        if (!msg->additional[i].name[0] ||
+            strlen(msg->additional[i].name) > 255 ||
+            msg->additional[i].rdlength > 65535) {
+            return BA_BADPARAM;
+        }
+    }
+    
+    return BA_OK;
+}
+
+/* Build DNS message */
+static LONG buildDNSMessage(struct DNSMessage *msg, struct DNSQuestion *question)
+{
+    /* Initialize message */
+    memset(msg, 0, sizeof(struct DNSMessage));
+    
+    /* Set header */
+    msg->header.id = 0;  /* mDNS uses 0 for ID */
+    msg->header.flags = DNS_FLAG_QUERY;
+    msg->header.qdcount = 1;
+    
+    /* Copy question */
+    strncpy(msg->questions[0].name, question->name, sizeof(msg->questions[0].name) - 1);
+    msg->questions[0].type = question->type;
+    msg->questions[0].class = question->class;
+    
+    return BA_OK;
+}
+
+/* Build DNS response */
+static LONG buildDNSResponse(struct DNSMessage *msg, struct DNSRecord *record)
+{
+    /* Initialize message */
+    memset(msg, 0, sizeof(struct DNSMessage));
+    
+    /* Set header */
+    msg->header.id = 0;  /* mDNS uses 0 for ID */
+    msg->header.flags = DNS_FLAG_RESPONSE;
+    msg->header.ancount = 1;
+    
+    /* Copy record */
+    strncpy(msg->answers[0].name, record->name, sizeof(msg->answers[0].name) - 1);
+    msg->answers[0].type = record->type;
+    msg->answers[0].class = record->class;
+    msg->answers[0].ttl = record->ttl;
+    msg->answers[0].rdlength = record->rdlength;
+    memcpy(msg->answers[0].rdata, record->rdata, record->rdlength);
+    
+    return BA_OK;
+}
+
+/* Send DNS message */
+static LONG sendDNSMessage(struct InterfaceState *iface, struct DNSMessage *msg)
+{
+    struct sockaddr_in addr;
+    LONG result;
+    
+    /* Validate message */
+    result = validateDNSMessage(msg);
+    if (result != BA_OK) {
+        return result;
+    }
+    
+    /* Initialize address */
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr(MDNS_MULTICAST_ADDR);
+    addr.sin_port = htons(MDNS_PORT);
+    
+    /* Send message */
+    result = sendto(iface->socket, msg, sizeof(struct DNSMessage), 0,
+                   (struct sockaddr *)&addr, sizeof(addr));
+    if (result < 0) {
+        logMessage(LOG_ERROR, "Failed to send DNS message: %s", strerror(errno));
+        return BA_NETWORK;
+    }
+    
+    return BA_OK;
+}
+
+/* Receive DNS message */
+static LONG receiveDNSMessage(struct InterfaceState *iface, struct DNSMessage *msg)
+{
+    struct sockaddr_in addr;
+    socklen_t addrlen = sizeof(addr);
+    LONG result;
+    
+    /* Receive message */
+    result = recvfrom(iface->socket, msg, sizeof(struct DNSMessage), 0,
+                     (struct sockaddr *)&addr, &addrlen);
+    if (result < 0) {
+        logMessage(LOG_ERROR, "Failed to receive DNS message: %s", strerror(errno));
+        return BA_NETWORK;
+    }
+    
+    /* Validate message */
+    result = validateDNSMessage(msg);
+    if (result != BA_OK) {
+        return result;
+    }
+    
+    return BA_OK;
+}
