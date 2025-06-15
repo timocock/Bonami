@@ -283,6 +283,7 @@ static void mainTask(void);
 /* Main function */
 int main(int argc, char **argv) {
     struct InterfaceState *iface;
+    struct Message *msg;
     LONG i;
     
     /* Initialize daemon */
@@ -310,7 +311,7 @@ int main(int argc, char **argv) {
         checkInterfaces();
         
         /* Process messages */
-        struct Message *msg = WaitPort(bonami.port);
+        msg = WaitPort(bonami.port);
         if (msg) {
             msg = GetMsg(bonami.port);
             if (msg) {
@@ -2289,6 +2290,8 @@ static LONG initMulticast(struct InterfaceState *iface)
     struct ip_mreq mreq;
     struct sockaddr_in addr;
     LONG result;
+    int reuse;
+    int ttl;
     
     /* Create socket */
     iface->socket = socket(AF_INET, SOCK_DGRAM, 0);
@@ -2298,7 +2301,7 @@ static LONG initMulticast(struct InterfaceState *iface)
     }
     
     /* Set socket options */
-    int reuse = 1;
+    reuse = 1;
     if (setsockopt(iface->socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
         logMessage(LOG_ERROR, "Failed to set SO_REUSEADDR: %s", strerror(errno));
         close(iface->socket);
@@ -2329,7 +2332,7 @@ static LONG initMulticast(struct InterfaceState *iface)
     }
     
     /* Set multicast TTL */
-    int ttl = MDNS_TTL;
+    ttl = MDNS_TTL;
     if (setsockopt(iface->socket, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) < 0) {
         logMessage(LOG_ERROR, "Failed to set multicast TTL: %s", strerror(errno));
         close(iface->socket);
@@ -2707,7 +2710,10 @@ static LONG receiveDNSMessage(struct InterfaceState *iface, struct DNSMessage *m
 static BOOL isInterfaceOnline(struct InterfaceState *iface)
 {
     struct ifreq ifr;
-    LONG now = time(NULL);
+    LONG now;
+    BOOL wasOnline;
+    
+    now = time(NULL);
     
     /* Don't check too frequently */
     if (now - iface->lastOnlineCheck < INTERFACE_CHECK_INTERVAL) {
@@ -2725,7 +2731,7 @@ static BOOL isInterfaceOnline(struct InterfaceState *iface)
     }
     
     /* Check if interface is up and running */
-    BOOL wasOnline = iface->online;
+    wasOnline = iface->online;
     iface->online = (ifr.ifr_flags & IFF_UP) && (ifr.ifr_flags & IFF_RUNNING);
     iface->lastOnlineCheck = now;
     
@@ -2742,8 +2748,11 @@ static BOOL isInterfaceOnline(struct InterfaceState *iface)
 static void checkInterfaces(void)
 {
     struct InterfaceState *iface;
+    struct Service *service;
     LONG i;
-    BOOL anyOnline = FALSE;
+    BOOL anyOnline;
+    
+    anyOnline = FALSE;
     
     for (i = 0; i < bonami.num_interfaces; i++) {
         iface = &bonami.interfaces[i];
@@ -2760,7 +2769,6 @@ static void checkInterfaces(void)
                     iface->active = TRUE;
                     
                     /* Reannounce services */
-                    struct Service *service;
                     for (service = (struct Service *)iface->services.lh_Head;
                          service->node.ln_Succ;
                          service = (struct Service *)service->node.ln_Succ) {
@@ -2787,6 +2795,7 @@ static void checkInterfaces(void)
 static void mainTask(void)
 {
     struct InterfaceState *iface;
+    struct Message *msg;
     LONG i;
     BOOL running = TRUE;
     
