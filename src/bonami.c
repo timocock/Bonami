@@ -140,11 +140,8 @@ struct InterfaceState {
     struct List announces; /* Services being announced */
     struct List records;   /* DNS records on this interface */
     struct List questions;  /* DNS questions on this interface */
-    LONG multicastMode;    /* Current multicast mode */
-    struct in_addr multicastAddrs[MAX_MULTICAST_ADDRESSES]; /* Multicast addresses */
-    LONG numMulticastAddrs; /* Number of multicast addresses */
-    BOOL orphanMode;      /* Whether using orphan mode */
-    struct Task *orphanTask; /* Task for orphan mode */
+    LONG socket;          /* Socket for this interface */
+    char name[32];        /* Interface name */
 };
 
 /* Cache entry */
@@ -1717,38 +1714,71 @@ static LONG validateDNSRecord(const struct DNSRecord *record)
 /* Initialize interfaces */
 static LONG initInterfaces(void)
 {
-    struct InterfaceState *iface;
-    LONG i;
+    struct ifreq ifr;
+    struct if_nameindex *if_ni, *i;
+    LONG result;
     
-    /* Allocate interface array */
-    bonami.interfaces = AllocMem(sizeof(struct InterfaceState) * MAX_INTERFACES,
-                               MEMF_CLEAR);
-    if (!bonami.interfaces) {
-        return BA_NOMEM;
+    /* Get interface list */
+    if_ni = if_nameindex();
+    if (!if_ni) {
+        logMessage(LOG_ERROR, "Failed to get interface list: %s", strerror(errno));
+        return BA_NETWORK;
     }
     
     /* Initialize interfaces */
-    for (i = 0; i < MAX_INTERFACES; i++) {
-        iface = &bonami.interfaces[i];
+    for (i = if_ni; i->if_index != 0 || i->if_name != NULL; i++) {
+        if (bonami.num_interfaces >= MAX_INTERFACES) {
+            break;
+        }
+        
+        struct InterfaceState *iface = &bonami.interfaces[bonami.num_interfaces];
+        
+        /* Get interface address */
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, i->if_name, sizeof(ifr.ifr_name) - 1);
+        
+        if (ioctl(bonami.socket, SIOCGIFADDR, &ifr) < 0) {
+            continue;
+        }
+        
+        /* Copy interface info */
+        strncpy(iface->name, i->if_name, sizeof(iface->name) - 1);
+        memcpy(&iface->addr, &((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr, sizeof(struct in_addr));
+        
+        /* Check if interface is up */
+        if (ioctl(bonami.socket, SIOCGIFFLAGS, &ifr) < 0) {
+            continue;
+        }
+        
+        if (!(ifr.ifr_flags & IFF_UP)) {
+            continue;
+        }
+        
+        /* Initialize multicast */
+        result = initMulticast(iface);
+        if (result != BA_OK) {
+            continue;
+        }
         
         /* Initialize lists */
-        NewList(iface->records);
-        NewList(iface->questions);
-        NewList(iface->probes);
-        NewList(iface->announces);
-        
-        /* Initialize socket */
-        iface->socket = createMulticastSocket();
-        if (iface->socket < 0) {
-            cleanupInterfaces();
-            return BA_ERROR;
-        }
+        NewList(&iface->services);
+        NewList(&iface->probes);
+        NewList(&iface->announces);
+        NewList(&iface->records);
+        NewList(&iface->questions);
         
         /* Set interface active */
         iface->active = TRUE;
+        bonami.num_interfaces++;
     }
     
-    bonami.num_interfaces = MAX_INTERFACES;
+    if_freenameindex(if_ni);
+    
+    if (bonami.num_interfaces == 0) {
+        logMessage(LOG_ERROR, "No active interfaces found");
+        return BA_NETWORK;
+    }
+    
     return BA_OK;
 }
 
@@ -1758,33 +1788,20 @@ static void cleanupInterfaces(void)
     struct InterfaceState *iface;
     LONG i;
     
-    if (!bonami.interfaces) {
-        return;
-    }
-    
-    /* Cleanup interfaces */
     for (i = 0; i < bonami.num_interfaces; i++) {
         iface = &bonami.interfaces[i];
         
-        /* Close socket */
-        if (iface->socket >= 0) {
-            #ifdef __amigaos4__
-            bonami.IRoadshow->close(iface->socket);
-            #else
-            close(iface->socket);
-            #endif
-        }
+        /* Cleanup multicast */
+        cleanupMulticast(iface);
         
         /* Free lists */
-        cleanupList(iface->records);
-        cleanupList(iface->questions);
-        cleanupList(iface->probes);
-        cleanupList(iface->announces);
+        cleanupList(&iface->services);
+        cleanupList(&iface->probes);
+        cleanupList(&iface->announces);
+        cleanupList(&iface->records);
+        cleanupList(&iface->questions);
     }
     
-    /* Free interface array */
-    FreeMem(bonami.interfaces, sizeof(struct InterfaceState) * MAX_INTERFACES);
-    bonami.interfaces = NULL;
     bonami.num_interfaces = 0;
 }
 
@@ -2228,52 +2245,61 @@ static void FreePooled(APTR memory, ULONG size)
 /* Initialize multicast for interface */
 static LONG initMulticast(struct InterfaceState *iface)
 {
-    struct TagItem tags[4];
+    struct ip_mreq mreq;
+    struct sockaddr_in addr;
     LONG result;
-    struct in_addr maddr;
     
-    /* Convert multicast address */
-    maddr.s_addr = inet_addr(MDNS_MULTICAST_ADDR);
-    
-    /* Try newer SANA-II commands first */
-    tags[0].ti_Tag = S2_ADDMULTICASTADDRESSES;
-    tags[0].ti_Data = (ULONG)&maddr;
-    tags[1].ti_Tag = TAG_END;
-    
-    result = DoPkt(iface->socket, ACTION_SANA_COMMAND, tags, NULL);
-    if (result == 0) {
-        /* Success with newer commands */
-        iface->multicastMode = MULTICAST_MODE_MULTIPLE;
-        iface->multicastAddrs[0] = maddr;
-        iface->numMulticastAddrs = 1;
-        return BA_OK;
+    /* Create socket */
+    iface->socket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (iface->socket < 0) {
+        logMessage(LOG_ERROR, "Failed to create socket: %s", strerror(errno));
+        return BA_NETWORK;
     }
     
-    /* Try older SANA-II commands */
-    tags[0].ti_Tag = S2_ADDMULTICASTADDRESS;
-    tags[0].ti_Data = (ULONG)&maddr;
-    tags[1].ti_Tag = TAG_END;
-    
-    result = DoPkt(iface->socket, ACTION_SANA_COMMAND, tags, NULL);
-    if (result == 0) {
-        /* Success with older commands */
-        iface->multicastMode = MULTICAST_MODE_SINGLE;
-        iface->multicastAddrs[0] = maddr;
-        iface->numMulticastAddrs = 1;
-        return BA_OK;
+    /* Set socket options */
+    int reuse = 1;
+    if (setsockopt(iface->socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        logMessage(LOG_ERROR, "Failed to set SO_REUSEADDR: %s", strerror(errno));
+        close(iface->socket);
+        return BA_NETWORK;
     }
     
-    /* Fall back to orphan mode */
-    iface->multicastMode = MULTICAST_MODE_ORPHAN;
-    iface->orphanMode = TRUE;
+    /* Bind to interface */
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = iface->addr.s_addr;
+    addr.sin_port = htons(MDNS_PORT);
     
-    /* Start orphan task */
-    iface->orphanTask = CreateTask("BonAmi Orphan",
-                                 -1,
-                                 orphanTask,
-                                 8192);
-    if (!iface->orphanTask) {
-        return BA_NOMEM;
+    if (bind(iface->socket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        logMessage(LOG_ERROR, "Failed to bind socket: %s", strerror(errno));
+        close(iface->socket);
+        return BA_NETWORK;
+    }
+    
+    /* Join multicast group */
+    memset(&mreq, 0, sizeof(mreq));
+    mreq.imr_multiaddr.s_addr = inet_addr(MDNS_MULTICAST_ADDR);
+    mreq.imr_interface.s_addr = iface->addr.s_addr;
+    
+    if (setsockopt(iface->socket, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+        logMessage(LOG_ERROR, "Failed to join multicast group: %s", strerror(errno));
+        close(iface->socket);
+        return BA_NETWORK;
+    }
+    
+    /* Set multicast TTL */
+    int ttl = MDNS_TTL;
+    if (setsockopt(iface->socket, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) < 0) {
+        logMessage(LOG_ERROR, "Failed to set multicast TTL: %s", strerror(errno));
+        close(iface->socket);
+        return BA_NETWORK;
+    }
+    
+    /* Set multicast interface */
+    if (setsockopt(iface->socket, IPPROTO_IP, IP_MULTICAST_IF, &iface->addr, sizeof(iface->addr)) < 0) {
+        logMessage(LOG_ERROR, "Failed to set multicast interface: %s", strerror(errno));
+        close(iface->socket);
+        return BA_NETWORK;
     }
     
     return BA_OK;
@@ -2282,30 +2308,10 @@ static LONG initMulticast(struct InterfaceState *iface)
 /* Cleanup multicast for interface */
 static void cleanupMulticast(struct InterfaceState *iface)
 {
-    struct TagItem tags[4];
-    
-    if (iface->orphanMode) {
-        /* Stop orphan task */
-        if (iface->orphanTask) {
-            Signal(iface->orphanTask, SIGBREAKF_CTRL_C);
-            Wait(0, SIGBREAKF_CTRL_C);
-            iface->orphanTask = NULL;
-        }
-        return;
+    if (iface->socket >= 0) {
+        close(iface->socket);
+        iface->socket = -1;
     }
-    
-    /* Remove multicast addresses */
-    if (iface->multicastMode == MULTICAST_MODE_MULTIPLE) {
-        tags[0].ti_Tag = S2_DELMULTICASTADDRESSES;
-        tags[0].ti_Data = (ULONG)iface->multicastAddrs;
-        tags[1].ti_Tag = TAG_END;
-    } else {
-        tags[0].ti_Tag = S2_REMMULTICASTADDRESS;
-        tags[0].ti_Data = (ULONG)&iface->multicastAddrs[0];
-        tags[1].ti_Tag = TAG_END;
-    }
-    
-    DoPkt(iface->socket, ACTION_SANA_COMMAND, tags, NULL);
 }
 
 /* Orphan task */
