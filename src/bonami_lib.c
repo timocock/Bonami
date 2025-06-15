@@ -1142,9 +1142,14 @@ struct Library *BAOpenLibrary(ULONG version, struct TagItem *tags)
 {
     struct BonAmiBase *base;
     struct TagItem *tag;
-    ULONG libVersion = 40;
-    BOOL debug = FALSE;
-    BOOL memTrack = FALSE;
+    ULONG libVersion;
+    BOOL debug;
+    BOOL memTrack;
+    
+    /* Initialize variables */
+    libVersion = 40;
+    debug = FALSE;
+    memTrack = FALSE;
     
     /* Check version */
     if (version > 40) {
@@ -1292,9 +1297,11 @@ static void untrackMemory(APTR memory, const char *file, LONG line)
 /* Send message with timeout */
 static LONG sendMessageTimeout(struct BAMessage *msg, ULONG timeout)
 {
-    struct BonAmiBase *base = (struct BonAmiBase *)SysBase->LibNode;
+    struct BonAmiBase *base;
     ULONG signals;
     LONG result;
+    
+    base = (struct BonAmiBase *)SysBase->LibNode;
     
     /* Send message */
     msg->mn_ReplyPort = base->replyPort;

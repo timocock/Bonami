@@ -333,6 +333,7 @@ static LONG handleList(struct RDArgs *args)
 static LONG handleResolve(struct RDArgs *args)
 {
     struct BAService service;
+    struct BADiscovery discovery;
     LONG result;
     
     /* Get arguments */
@@ -346,13 +347,12 @@ static LONG handleResolve(struct RDArgs *args)
     service.name = (char *)args->RDA_NAME;
     service.type = (char *)args->RDA_TYPE;
     
-    /* Start discovery */
-    struct BADiscovery discovery = {
-        .type = service.type,
-        .callback = discoveryCallback,
-        .userData = NULL
-    };
+    /* Initialize discovery */
+    discovery.type = service.type;
+    discovery.callback = discoveryCallback;
+    discovery.userData = NULL;
     
+    /* Start discovery */
     #ifdef __amigaos4__
     result = cmd.IBonAmi->BAStartDiscovery(&discovery);
     #else
@@ -384,6 +384,8 @@ static LONG handleResolve(struct RDArgs *args)
 static LONG handleMonitor(struct RDArgs *args)
 {
     LONG result;
+    LONG interval;
+    BOOL notify;
     
     /* Get arguments */
     if (!(args->RDA_Flags & RDA_NAME) || !(args->RDA_Flags & RDA_TYPE)) {
@@ -393,13 +395,13 @@ static LONG handleMonitor(struct RDArgs *args)
     }
     
     /* Get interval */
-    LONG interval = 30;
+    interval = 30;
     if (args->RDA_Flags & RDA_INTERVAL) {
         interval = *(LONG *)args->RDA_INTERVAL;
     }
     
     /* Get notify flag */
-    BOOL notify = FALSE;
+    notify = FALSE;
     if (args->RDA_Flags & RDA_NOTIFY) {
         notify = TRUE;
     }
@@ -437,6 +439,7 @@ static LONG handleStatus(struct RDArgs *args)
 {
     struct BAStatus status;
     struct BAInterface interface;
+    struct InterfaceNode *iface;
     LONG result;
     
     /* Get daemon status */
@@ -461,7 +464,7 @@ static LONG handleStatus(struct RDArgs *args)
     
     /* Print interface status */
     printf("\nInterfaces:\n");
-    for (struct InterfaceNode *iface = (struct InterfaceNode *)daemonState.interfaces.lh_Head;
+    for (iface = (struct InterfaceNode *)daemonState.interfaces.lh_Head;
          iface->node.ln_Succ;
          iface = (struct InterfaceNode *)iface->node.ln_Succ) {
         interface.name = iface->name;
