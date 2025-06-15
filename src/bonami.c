@@ -282,6 +282,9 @@ static void mainTask(void);
 
 /* Main function */
 int main(int argc, char **argv) {
+    struct InterfaceState *iface;
+    LONG i;
+    
     /* Initialize daemon */
     if (initDaemon() != BA_OK) {
         logMessage(LOG_ERROR, "Failed to initialize daemon\n");
@@ -290,12 +293,22 @@ int main(int argc, char **argv) {
 
     /* Set up signal handling */
     SetSignal(0, SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E);
-
+    
+    /* Initialize interfaces */
+    if (initInterfaces() != BA_OK) {
+        logMessage(LOG_ERROR, "Failed to initialize interfaces");
+        cleanupDaemon();
+        return RETURN_ERROR;
+    }
+    
     /* Main loop */
     while (bonami.running) {
         /* Check for signals */
         handleSignals();
-
+        
+        /* Check interfaces */
+        checkInterfaces();
+        
         /* Process messages */
         struct Message *msg = WaitPort(bonami.port);
         if (msg) {
@@ -304,9 +317,31 @@ int main(int argc, char **argv) {
                 processMessage((struct BAMessage *)msg);
             }
         }
+        
+        /* Process each active interface */
+        for (i = 0; i < bonami.num_interfaces; i++) {
+            iface = &bonami.interfaces[i];
+            
+            if (!iface->active || !iface->online) {
+                continue;
+            }
+            
+            /* Process probes */
+            processProbes(iface);
+            
+            /* Process announcements */
+            processAnnouncements(iface);
+            
+            /* Process DNS messages */
+            processDNSMessages(iface);
+        }
+        
+        /* Small delay to prevent CPU hogging */
+        Delay(1);
     }
-
+    
     /* Cleanup */
+    cleanupInterfaces();
     cleanupDaemon();
     return RETURN_OK;
 }
