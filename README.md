@@ -180,29 +180,69 @@ result = BAUnregisterService("My Service", "_http._tcp");
 
 ## Examples
 
-### Service Registration
+### Advertising a Service from Amiga
+
+This example shows how to advertise a service running on your Amiga. Let's say you have a web server running on port 8080:
 
 ```c
 #include <proto/bonami.h>
+#include <proto/exec.h>
+#include <proto/dos.h>
 
 int main(int argc, char **argv)
 {
-    struct BAService service = {
-        .name = "My Service",
-        .type = "_http._tcp",
-        .port = 80,
-        .txt = "path=/"
-    };
-
-    LONG result = BARegisterService(&service);
-    if (result != BA_OK) {
-        printf("Failed to register service: %ld\n", result);
-        return 1;
+    // Open the library
+    struct Library *BonAmiBase = BAOpenLibrary(40, NULL);
+    if (!BonAmiBase) {
+        Printf("Failed to open bonami.library\n");
+        return RETURN_FAIL;
     }
 
-    return 0;
+    // Create a service structure
+    struct BAService service = {
+        .name = "AmigaWebServer",    // Your service name
+        .type = "_http._tcp",        // HTTP service type
+        .port = 8080,                // Your web server port
+        .txt = "path=/",             // Optional TXT record
+    };
+
+    // Register the service
+    LONG result = BARegisterService(&service);
+    if (result != BA_OK) {
+        Printf("Failed to register service: %ld\n", result);
+        BACloseLibrary(BonAmiBase);
+        return RETURN_FAIL;
+    }
+
+    Printf("Service registered successfully!\n");
+    Printf("Other devices can now discover 'AmigaWebServer' on the network\n");
+
+    // Keep the service registered
+    Printf("Press Ctrl-C to unregister and exit\n");
+    Wait(SIGBREAKF_CTRL_C);
+
+    // Unregister the service before exiting
+    BAUnregisterService(service.name, service.type);
+    BACloseLibrary(BonAmiBase);
+
+    return RETURN_OK;
 }
 ```
+
+You can also use the command line tool to register the service:
+
+```bash
+# Register the web server
+BACtl register NAME=AmigaWebServer TYPE=_http._tcp PORT=8080 TXT=path=/
+
+# Check if it's registered
+BACtl list TYPE=_http._tcp
+
+# When done, unregister it
+BACtl unregister NAME=AmigaWebServer TYPE=_http._tcp
+```
+
+This will make your Amiga's web server discoverable by other devices on the network. They can find it by searching for "_http._tcp" services, and they'll see "AmigaWebServer" in their list of available web servers.
 
 ### Service Discovery
 
