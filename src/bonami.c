@@ -44,6 +44,7 @@ static const char version[] = "$VER: Bonami 40.0 (01.01.2024)";
 #define RESOLVE_TIMEOUT 2
 #define MAX_MULTICAST_ADDRESSES 32
 #define INTERFACE_CHECK_INTERVAL 5  /* Check interfaces every 5 seconds */
+#define INTERFACE_SIGNAL 0x80000000 /* Signal bit for interface changes */
 
 /* Multicast modes */
 #define MULTICAST_MODE_AUTO 0
@@ -145,6 +146,7 @@ struct InterfaceState {
     char name[32];        /* Interface name */
     BOOL online;          /* Whether interface is online */
     LONG lastOnlineCheck; /* Last time we checked if interface was online */
+    struct in_addr lastAddr; /* Last known IP address */
 };
 
 /* Cache entry */
@@ -220,6 +222,14 @@ static struct {
     struct RoadshowIFace *IRoadshow;
     struct UtilityIFace *IUtility;
     #endif
+    struct Library *BonAmiBase;
+    struct Task *task;
+    LONG socket;
+    struct SignalSemaphore sem;
+    BOOL memTrack;
+    #ifdef __amigaos4__
+    struct BonAmiIFace *IBonAmi;
+    #endif
 } bonami;
 
 /* Function prototypes */
@@ -279,6 +289,10 @@ static void processRecord(struct InterfaceState *iface, struct DNSRecord *record
 static BOOL isInterfaceOnline(struct InterfaceState *iface);
 static void checkInterfaces(void);
 static void mainTask(void);
+static LONG checkInterfaceConfig(struct InterfaceState *iface);
+static void interfaceMonitorTask(void);
+static LONG initInterfaceMonitoring(void);
+static void cleanupInterfaceMonitoring(void);
 
 /* Main function */
 int main(int argc, char **argv) {
@@ -2834,4 +2848,259 @@ static void mainTask(void)
     
     /* Cleanup */
     cleanupInterfaces();
+}
+
+/* Check interface configuration */
+static LONG checkInterfaceConfig(struct InterfaceState *iface)
+{
+    struct ifreq ifr;
+    struct ifconf ifc;
+    struct ifreq *ifr_ptr;
+    char buf[1024];
+    BOOL found;
+    LONG i;
+    
+    /* Get interface configuration */
+    memset(&ifc, 0, sizeof(ifc));
+    ifc.ifc_len = sizeof(buf);
+    ifc.ifc_buf = buf;
+    
+    if (ioctl(bonami.socket, SIOCGIFCONF, &ifc) < 0) {
+        logMessage(LOG_ERROR, "Failed to get interface configuration: %s", strerror(errno));
+        return BA_NETWORK;
+    }
+    
+    /* Find interface */
+    found = FALSE;
+    ifr_ptr = ifc.ifc_req;
+    for (i = 0; i < ifc.ifc_len / sizeof(struct ifreq); i++) {
+        if (strcmp(ifr_ptr[i].ifr_name, iface->name) == 0) {
+            found = TRUE;
+            break;
+        }
+    }
+    
+    if (!found) {
+        /* Interface no longer exists */
+        if (iface->online) {
+            logMessage(LOG_INFO, "Interface %s removed", iface->name);
+            iface->online = FALSE;
+            iface->active = FALSE;
+            cleanupMulticast(iface);
+        }
+        return BA_OK;
+    }
+    
+    /* Get interface flags */
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, iface->name, sizeof(ifr.ifr_name) - 1);
+    
+    if (ioctl(bonami.socket, SIOCGIFFLAGS, &ifr) < 0) {
+        logMessage(LOG_ERROR, "Failed to get interface flags: %s", strerror(errno));
+        return BA_NETWORK;
+    }
+    
+    /* Check if interface state changed */
+    if (iface->lastConfig.ifr_flags != ifr.ifr_flags) {
+        BOOL wasOnline = iface->online;
+        iface->online = (ifr.ifr_flags & IFF_UP) && (ifr.ifr_flags & IFF_RUNNING);
+        
+        if (wasOnline != iface->online) {
+            logMessage(LOG_INFO, "Interface %s is now %s", 
+                      iface->name, iface->online ? "online" : "offline");
+            
+            if (iface->online) {
+                /* Interface came online */
+                if (!iface->active) {
+                    if (initMulticast(iface) == BA_OK) {
+                        iface->active = TRUE;
+                        
+                        /* Reannounce services */
+                        struct Service *service;
+                        for (service = (struct Service *)iface->services.lh_Head;
+                             service->node.ln_Succ;
+                             service = (struct Service *)service->node.ln_Succ) {
+                            startAnnouncement(service);
+                        }
+                    }
+                }
+            } else {
+                /* Interface went offline */
+                if (iface->active) {
+                    cleanupMulticast(iface);
+                    iface->active = FALSE;
+                }
+            }
+        }
+        
+        /* Update last known configuration */
+        memcpy(&iface->lastConfig, &ifr, sizeof(struct ifreq));
+    }
+    
+    return BA_OK;
+}
+
+/* Interface monitor task */
+static void interfaceMonitorTask(void)
+{
+    struct InterfaceState *iface;
+    LONG i;
+    ULONG signals;
+    
+    while (bonami.running) {
+        /* Wait for interface change signal or timeout */
+        signals = Wait(INTERFACE_SIGNAL | SIGBREAKF_CTRL_C);
+        
+        if (signals & SIGBREAKF_CTRL_C) {
+            break;
+        }
+        
+        if (signals & INTERFACE_SIGNAL) {
+            /* Check all interfaces */
+            for (i = 0; i < bonami.num_interfaces; i++) {
+                iface = &bonami.interfaces[i];
+                checkInterfaceConfig(iface);
+            }
+        }
+    }
+}
+
+/* Initialize interface monitoring */
+static LONG initInterfaceMonitoring(void)
+{
+    struct InterfaceState *iface;
+    LONG i;
+    
+    /* Initialize last known configuration for each interface */
+    for (i = 0; i < bonami.num_interfaces; i++) {
+        iface = &bonami.interfaces[i];
+        
+        /* Get initial configuration */
+        memset(&iface->lastConfig, 0, sizeof(struct ifreq));
+        strncpy(iface->lastConfig.ifr_name, iface->name, sizeof(iface->lastConfig.ifr_name) - 1);
+        
+        if (ioctl(bonami.socket, SIOCGIFFLAGS, &iface->lastConfig) < 0) {
+            logMessage(LOG_ERROR, "Failed to get initial interface flags: %s", strerror(errno));
+            return BA_NETWORK;
+        }
+    }
+    
+    /* Start monitor task */
+    bonami.task = CreateTask("BonAmi Interface Monitor",
+                            -1,
+                            interfaceMonitorTask,
+                            8192);
+    if (!bonami.task) {
+        logMessage(LOG_ERROR, "Failed to create interface monitor task");
+        return BA_NOMEM;
+    }
+    
+    return BA_OK;
+}
+
+/* Cleanup interface monitoring */
+static void cleanupInterfaceMonitoring(void)
+{
+    if (bonami.task) {
+        Signal(bonami.task, SIGBREAKF_CTRL_C);
+        Wait(0, SIGBREAKF_CTRL_C);
+        bonami.task = NULL;
+    }
+}
+
+/* Check interface state */
+static LONG checkInterfaceState(struct InterfaceState *iface)
+{
+    struct ifreq ifr;
+    BOOL wasOnline;
+    struct in_addr currentAddr;
+    
+    /* Get interface address */
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, iface->name, sizeof(ifr.ifr_name) - 1);
+    
+    if (ioctl(bonami.socket, SIOCGIFADDR, &ifr) < 0) {
+        /* Interface might be down */
+        if (iface->online) {
+            logMessage(LOG_INFO, "Interface %s is now offline", iface->name);
+            iface->online = FALSE;
+            iface->active = FALSE;
+            cleanupMulticast(iface);
+        }
+        return BA_OK;
+    }
+    
+    /* Get interface flags */
+    if (ioctl(bonami.socket, SIOCGIFFLAGS, &ifr) < 0) {
+        logMessage(LOG_ERROR, "Failed to get interface flags: %s", strerror(errno));
+        return BA_NETWORK;
+    }
+    
+    /* Check if interface is up and running */
+    wasOnline = iface->online;
+    iface->online = (ifr.ifr_flags & IFF_UP) && (ifr.ifr_flags & IFF_RUNNING);
+    
+    /* Get current IP address */
+    currentAddr = ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr;
+    
+    /* Check if interface state changed */
+    if (wasOnline != iface->online || 
+        (iface->online && memcmp(&currentAddr, &iface->lastAddr, sizeof(struct in_addr)) != 0)) {
+        
+        if (wasOnline != iface->online) {
+            logMessage(LOG_INFO, "Interface %s is now %s", 
+                      iface->name, iface->online ? "online" : "offline");
+        }
+        
+        if (iface->online) {
+            /* Interface came online or IP changed */
+            if (!iface->active || memcmp(&currentAddr, &iface->lastAddr, sizeof(struct in_addr)) != 0) {
+                iface->addr = currentAddr;
+                iface->linkLocal = isLinkLocal(currentAddr);
+                
+                if (initMulticast(iface) == BA_OK) {
+                    iface->active = TRUE;
+                    
+                    /* Reannounce services */
+                    struct Service *service;
+                    for (service = (struct Service *)iface->services.lh_Head;
+                         service->node.ln_Succ;
+                         service = (struct Service *)service->node.ln_Succ) {
+                        startAnnouncement(service);
+                    }
+                }
+            }
+        } else {
+            /* Interface went offline */
+            if (iface->active) {
+                cleanupMulticast(iface);
+                iface->active = FALSE;
+            }
+        }
+        
+        /* Update last known address */
+        iface->lastAddr = currentAddr;
+    }
+    
+    return BA_OK;
+}
+
+/* Check all interfaces */
+static void checkInterfaces(void)
+{
+    struct InterfaceState *iface;
+    LONG i;
+    LONG currentTime;
+    
+    currentTime = time(NULL);
+    
+    for (i = 0; i < bonami.num_interfaces; i++) {
+        iface = &bonami.interfaces[i];
+        
+        /* Check if it's time to check this interface */
+        if (currentTime - iface->lastOnlineCheck >= INTERFACE_CHECK_INTERVAL) {
+            checkInterfaceState(iface);
+            iface->lastOnlineCheck = currentTime;
+        }
+    }
 }
